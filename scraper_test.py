@@ -772,9 +772,28 @@ def scrape_task(url: str):
 
                     # Verify we landed on the expected page
                     if page_num != expected_page:
-                        logger.error(f"❌ Page mismatch! Expected page {expected_page}, but landed on page {page_num}")
-                        scraper.save_debug_snapshot(f"page_mismatch_exp{expected_page}_act{page_num}")
-                        break  # Stop pagination on mismatch
+                        logger.warning(f"⚠️  Page mismatch! Expected page {expected_page}, but landed on page {page_num}")
+                        logger.info(f"Attempting to navigate directly to page {expected_page}...")
+
+                        # Construct URL for expected page
+                        current_url = scraper.sb.get_current_url()
+                        base_url = current_url.split('?')[0]  # Remove query params
+
+                        if expected_page == 1:
+                            target_url = base_url
+                        else:
+                            target_url = f"{base_url}?o={expected_page}"
+
+                        # Try to navigate directly to the correct page
+                        recovery_state = scraper.goto_url(target_url)
+
+                        if recovery_state != PageState.SUCCESS:
+                            logger.error(f"❌ Failed to recover: could not navigate to page {expected_page}")
+                            scraper.save_debug_snapshot(f"recovery_failed_page{expected_page}")
+                            break  # Stop pagination if recovery fails
+
+                        logger.info(f"✓ Recovered: successfully navigated to page {expected_page}")
+                        page_num = expected_page  # Update to expected page
 
                     # Update current page and extract data
                     current_page = page_num
