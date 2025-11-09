@@ -1,0 +1,169 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+OLX Scraper - Clean Rebuild with Test-Driven Approach
+Testing each component before building the next
+"""
+import time
+import re
+import logging
+from bs4 import BeautifulSoup
+from seleniumbase import sb_cdp
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+# Suppress noisy libraries
+for lib in ["seleniumbase", "selenium", "urllib3"]:
+    logging.getLogger(lib).setLevel(logging.WARNING)
+
+
+class OlxScraper:
+    """
+    Clean implementation of OLX property scraper.
+    Built incrementally with testing at each step.
+    """
+
+    # ========================================================================
+    # CONSTANTS - Site Configuration
+    # ========================================================================
+
+    BASE_URL = "https://www.olx.com.br/"
+    SITE_NAME = "olx"
+
+    # Selectors
+    PAGE_LOADED_SELECTOR = 'div.AdListing_adListContainer__ALQla'
+    LISTING_CARD_SELECTOR = 'section.olx-adcard'
+    NEXT_PAGE_BUTTON = '//a[text()="Próxima página"]'
+    NO_RESULTS_MESSAGE = 'Ops! Nenhum anúncio foi encontrado.'
+
+    # Captcha detection patterns
+    CAPTCHA_TITLE_KEYWORDS = ["Um momento", "Just a moment"]
+    CAPTCHA_TEXT_KEYWORDS = ["Confirme que você é humano", "cf-challenge"]
+
+    # Settings
+    LOAD_TIMEOUT = 15
+    BROWSER_LOCALE = "pt-br"
+
+    # ========================================================================
+    # INITIALIZATION
+    # ========================================================================
+
+    def __init__(self):
+        """Initialize scraper instance."""
+        self.sb = None
+        logger.debug("OlxScraper instance created")
+
+    # ========================================================================
+    # METHODS - To be implemented incrementally
+    # ========================================================================
+
+    # TODO: Browser management
+    # - init_browser()
+    # - close_browser()
+    # - restart_browser()
+
+    # TODO: Navigation
+    # - navigate()
+    # - verify_page_loaded()
+
+    # TODO: Captcha handling
+    # - is_captcha_page()
+    # - handle_captcha()
+
+    # TODO: Data extraction
+    # - extract_page_data()
+    # - detect_total_pages()
+
+    # TODO: Pagination
+    # - click_next_page()
+    # - get_current_page_number()
+    # - get_page_url()
+
+    # TODO: Utilities
+    # - is_no_results_page()
+
+
+# ============================================================================
+# MANUAL TESTS - Run each test as we build methods
+# ============================================================================
+
+def test_browser_init():
+    """Test 1: Browser initialization"""
+    print("\n" + "="*60)
+    print("TEST 1: Browser Initialization")
+    print("="*60)
+
+    scraper = OlxScraper()
+    # TODO: Implement init_browser() first, then uncomment:
+    # scraper.init_browser(headless=False)
+    # print("✓ Browser initialized successfully")
+    # scraper.close_browser()
+    # print("✓ Browser closed successfully")
+
+    print("⏸️  Test pending - implement init_browser() first")
+
+
+def test_navigation():
+    """Test 2: Navigate to OLX page and verify load"""
+    print("\n" + "="*60)
+    print("TEST 2: Navigation & Page Load")
+    print("="*60)
+
+    # TODO: Implement after browser init works
+    print("⏸️  Test pending - implement navigate() and verify_page_loaded()")
+
+
+def test_extract_data():
+    """Test 3: Extract URLs and prices from a page"""
+    print("\n" + "="*60)
+    print("TEST 3: Data Extraction")
+    print("="*60)
+
+    # TODO: Implement after navigation works
+    print("⏸️  Test pending - implement extract_page_data()")
+
+
+def test_pagination():
+    """Test 4: Click next page and verify navigation"""
+    print("\n" + "="*60)
+    print("TEST 4: Pagination")
+    print("="*60)
+
+    # TODO: Implement after data extraction works
+    print("⏸️  Test pending - implement click_next_page()")
+
+
+def test_full_task():
+    """Test 5: Complete mini-task (scrape 3 pages)"""
+    print("\n" + "="*60)
+    print("TEST 5: Full Task (3 pages)")
+    print("="*60)
+
+    # TODO: Implement after all components work
+    print("⏸️  Test pending - implement full workflow")
+
+
+# ============================================================================
+# MAIN - Run tests
+# ============================================================================
+
+if __name__ == "__main__":
+    print("\n🧪 OLX SCRAPER - INCREMENTAL TESTING")
+    print("="*60)
+
+    # Run tests one by one as we build
+    test_browser_init()
+    test_navigation()
+    test_extract_data()
+    test_pagination()
+    test_full_task()
+
+    print("\n" + "="*60)
+    print("Testing session complete")
+    print("="*60 + "\n")
