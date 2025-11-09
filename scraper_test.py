@@ -766,10 +766,18 @@ def scrape_task(url: str):
                 next_state = scraper.goto_next_page()
 
                 if next_state == PageState.SUCCESS:
-                    current_page += 1
-
-                    # Extract data from new page
+                    # Extract actual page number from URL
                     page_num = scraper.get_page_number()
+                    expected_page = current_page + 1
+
+                    # Verify we landed on the expected page
+                    if page_num != expected_page:
+                        logger.error(f"❌ Page mismatch! Expected page {expected_page}, but landed on page {page_num}")
+                        scraper.save_debug_snapshot(f"page_mismatch_exp{expected_page}_act{page_num}")
+                        break  # Stop pagination on mismatch
+
+                    # Update current page and extract data
+                    current_page = page_num
                     page_data = scraper.get_page_data()
                     logger.info(f"📄 Page {page_num}: Extracted {len(page_data)} listings")
 
