@@ -3,7 +3,7 @@
 """
 Simple Thread-Based Scraper using new Redis-only architecture
 """
-import time, logging, signal, sys, threading
+import time, logging, signal, sys, threading, queue
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from scraper_worker import OlxScraper
 
@@ -69,12 +69,62 @@ redis_clients = None  # CHANGED: Now multiple Redis clients
 stats_lock = threading.Lock()
 total_stats = {'pages': 0, 'urls': 0, 'new': 0, 'price_changes': 0, 'duplicates': 0, 'errors': 0}  # CHANGED: Stats names
 
+# Redis writer queue - decouples Redis I/O from scraping
+redis_queue = queue.Queue(maxsize=1000)  # Buffer up to 1000 batches
+
 def signal_handler(sig, frame):
     logger.info("Shutdown requested")
     shutdown_event.set()
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
+
+def redis_writer_worker():
+    """
+    Background thread that consumes URL batches from queue and writes to Redis.
+
+    This decouples Redis network I/O from scraper threads, allowing scrapers
+    to continue immediately after extraction without blocking on Redis writes.
+    """
+    logger.info("🔌 Redis writer thread started")
+
+    while not shutdown_event.is_set():
+        try:
+            # Get batch from queue (timeout so we can check shutdown)
+            batch_data = redis_queue.get(timeout=1.0)
+
+            if batch_data is None:  # Poison pill for shutdown
+                break
+
+            urls, metadata = batch_data
+
+            # Write to Redis (this blocks, but doesn't block scrapers!)
+            try:
+                # Use the scraper's store method via redis_clients
+                stats = redis_clients['url_stream'].store_batch(urls, metadata)
+
+                # Update global stats
+                with stats_lock:
+                    total_stats['urls'] += len(urls)
+                    total_stats['new'] += stats['new']
+                    total_stats['price_changes'] += stats['price_changes']
+                    total_stats['duplicates'] += stats['duplicates']
+
+                logger.debug(f"✓ Redis wrote {len(urls)} URLs: 🆕{stats['new']} 💰{stats['price_changes']} 🔄{stats['duplicates']}")
+
+            except Exception as e:
+                logger.error(f"Redis write error: {e}")
+                with stats_lock:
+                    total_stats['errors'] += 1
+
+            redis_queue.task_done()
+
+        except queue.Empty:
+            continue
+        except Exception as e:
+            logger.error(f"Redis writer unexpected error: {e}")
+
+    logger.info("🔌 Redis writer thread stopped")
 
 def generate_tasks() -> list:
     """
@@ -265,18 +315,15 @@ def scrape_task(task):
                 logger.warning(f"[{key}] Page {page}/{total_pages}: 'No results' message detected - stopping chunk early")
                 break
 
-            # Store URLs with Redis
+            # Queue URLs for Redis (non-blocking)
             if urls:
-                stats = scraper.store_urls_batch(urls, metadata)
+                # Put in queue instead of blocking on Redis write
+                redis_queue.put((urls, metadata))
+
                 with stats_lock:
-                    total_stats['urls'] += len(urls)
-                    total_stats['new'] += stats['new']
-                    total_stats['price_changes'] += stats['price_changes']
-                    total_stats['duplicates'] += stats['duplicates']
                     total_stats['pages'] += 1
 
-                logger.info(f"[{key}] Page {page}/{total_pages}: {len(urls)} URLs | "
-                           f"🆕{stats['new']} 💰{stats['price_changes']} 🔄{stats['duplicates']}")
+                logger.info(f"[{key}] Page {page}/{total_pages}: {len(urls)} URLs queued for Redis")
             else:
                 with stats_lock:
                     total_stats['errors'] += 1
