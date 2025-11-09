@@ -705,14 +705,19 @@ class OlxScraper:
 
 def scrape_task(url: str):
     """
-    Orchestrate scraping workflow based on page state.
+    Orchestrate scraping workflow based on page state with retry logic.
 
     Handles different page states:
     - SUCCESS: Continue with scraping
     - NO_RESULTS: Stop gracefully (no listings)
-    - CAPTCHA: Captcha couldn't be solved
-    - TIMEOUT: Page failed to load
-    - UNKNOWN: Unexpected page state
+    - CAPTCHA: Captcha couldn't be solved (will retry)
+    - TIMEOUT: Page failed to load (will retry)
+    - UNKNOWN: Unexpected page state (will retry)
+
+    Retry strategy:
+    - On error: restart browser, navigate to failed page, continue
+    - Up to 3 total attempts per error
+    - No retry on graceful stops (NO_RESULTS, pagination limit)
 
     Args:
         url: URL to test with
@@ -722,42 +727,85 @@ def scrape_task(url: str):
     logger.info(f"Test URL: {url}")
     logger.info("="*60)
 
-    scraper = None
+    MAX_RETRIES = 3
+    MAX_TEST_PAGES = 50
 
-    try:
-        # Initialize scraper
-        scraper = OlxScraper()
-        logger.info("✓ Scraper instance created")
+    # Persistent state across retries
+    base_url = url.split('?')[0]  # Extract base URL for constructing page URLs
+    pagination_limit = MAX_TEST_PAGES  # Will be updated after first successful page 1
+    start_page = 1  # Which page to start from (updated on retry)
 
-        # Initialize browser
-        scraper.init_browser()
-        logger.info("✓ Browser initialized")
+    for attempt in range(MAX_RETRIES):
+        scraper = None
 
-        # Navigate and get page state
-        state = scraper.goto_url(url)
-        logger.info(f"Page state: {state}")
+        try:
+            if attempt > 0:
+                logger.info("="*60)
+                logger.info(f"🔄 RETRY ATTEMPT {attempt + 1}/{MAX_RETRIES}")
+                logger.info(f"Resuming from page {start_page}")
+                logger.info("="*60)
+                time.sleep(2)  # Brief delay before retry
 
-        # Orchestrate actions based on state
-        if state == PageState.SUCCESS:
+            # Initialize scraper
+            scraper = OlxScraper()
+            logger.info("✓ Scraper instance created")
+
+            # Initialize browser
+            scraper.init_browser()
+            logger.info("✓ Browser initialized")
+
+            # Construct URL for starting page
+            if start_page == 1:
+                start_url = base_url
+            else:
+                start_url = f"{base_url}?o={start_page}"
+
+            # Navigate and get page state
+            state = scraper.goto_url(start_url)
+            logger.info(f"Page state: {state}")
+
+            # Handle initial navigation result
+            if state == PageState.NO_RESULTS:
+                # Graceful stop - don't retry
+                logger.info("="*60)
+                logger.info("⚠️  NO RESULTS - No listings found")
+                logger.info("Stopping task gracefully")
+                logger.info("="*60)
+                return
+
+            elif state in [PageState.CAPTCHA, PageState.TIMEOUT, PageState.UNKNOWN]:
+                # Error - will retry
+                logger.error(f"❌ Initial navigation failed: {state}")
+                scraper.save_debug_snapshot(f"initial_{state}_attempt{attempt + 1}")
+                continue  # Next retry attempt
+
+            elif state != PageState.SUCCESS:
+                # Unexpected state
+                logger.error(f"❌ Unexpected initial state: {state}")
+                continue  # Next retry attempt
+
+            # SUCCESS - proceed with scraping
             logger.info("="*60)
             logger.info("✓ SUCCESS - Ready to scrape")
             logger.info("="*60)
 
-            # Extract data from initial page (page 1)
+            # Extract data from starting page
             page_num = scraper.get_page_number()
             page_data = scraper.get_page_data()
             logger.info(f"📄 Page {page_num}: Extracted {len(page_data)} listings")
 
-            # Detect total pages from the website
-            total_pages = scraper.get_total_pages()
+            # Detect total pages (only on first attempt from page 1)
+            if attempt == 0 and start_page == 1:
+                total_pages = scraper.get_total_pages()
+                pagination_limit = min(total_pages, MAX_TEST_PAGES) if total_pages > 0 else MAX_TEST_PAGES
+                logger.info(f"Pagination limit set to {pagination_limit} pages")
 
-            # Calculate pagination limit: min(detected_pages, max_allowed)
-            MAX_TEST_PAGES = 50
-            pagination_limit = min(total_pages, MAX_TEST_PAGES) if total_pages > 0 else MAX_TEST_PAGES
-
-            current_page = 1
+            current_page = start_page
 
             logger.info(f"Starting pagination (limit: {pagination_limit} pages)")
+
+            # Track if we should retry (error occurred)
+            should_retry = False
 
             while current_page < pagination_limit:
                 logger.info(f"On page {current_page}, navigating to next page...")
@@ -789,8 +837,11 @@ def scrape_task(url: str):
 
                         if recovery_state != PageState.SUCCESS:
                             logger.error(f"❌ Failed to recover: could not navigate to page {expected_page}")
-                            scraper.save_debug_snapshot(f"recovery_failed_page{expected_page}")
-                            break  # Stop pagination if recovery fails
+                            scraper.save_debug_snapshot(f"recovery_failed_page{expected_page}_attempt{attempt + 1}")
+                            # Set retry from this page
+                            start_page = expected_page
+                            should_retry = True
+                            break
 
                         logger.info(f"✓ Recovered: successfully navigated to page {expected_page}")
                         page_num = expected_page  # Update to expected page
@@ -801,70 +852,58 @@ def scrape_task(url: str):
                     logger.info(f"📄 Page {page_num}: Extracted {len(page_data)} listings")
 
                 elif next_state == PageState.NO_RESULTS:
+                    # Graceful stop - don't retry
                     logger.info(f"Reached end of listings at page {current_page}")
                     break
 
                 elif next_state in [PageState.TIMEOUT, PageState.UNKNOWN]:
+                    # Error - will retry from this page
                     logger.warning(f"Navigation failed on page {current_page}: {next_state}")
-                    scraper.save_debug_snapshot(f"pagination_{next_state}_page{current_page}")
+                    scraper.save_debug_snapshot(f"pagination_{next_state}_page{current_page}_attempt{attempt + 1}")
+                    start_page = current_page + 1  # Retry from next page
+                    should_retry = True
                     break
 
                 elif next_state == PageState.CAPTCHA:
+                    # Error - will retry from this page
                     logger.error(f"Captcha on page {current_page}")
-                    scraper.save_debug_snapshot(f"pagination_captcha_page{current_page}")
+                    scraper.save_debug_snapshot(f"pagination_captcha_page{current_page}_attempt{attempt + 1}")
+                    start_page = current_page + 1  # Retry from next page
+                    should_retry = True
                     break
 
-            logger.info(f"Pagination complete: scraped {current_page} of {pagination_limit} pages")
+            # Check if we should retry or if pagination completed
+            if should_retry:
+                logger.warning(f"Error occurred, will retry from page {start_page}")
+                continue  # Next retry attempt
 
-        elif state == PageState.NO_RESULTS:
-            logger.info("="*60)
-            logger.info("⚠️  NO RESULTS - No listings found")
-            logger.info("Stopping task gracefully")
-            logger.info("="*60)
-            return
+            # Pagination completed successfully
+            logger.info(f"✅ Pagination complete: scraped {current_page} of {pagination_limit} pages")
+            return  # Success - exit retry loop
 
-        elif state == PageState.CAPTCHA:
-            logger.error("="*60)
-            logger.error("✗ CAPTCHA FAILED - Couldn't solve captcha")
-            scraper.save_debug_snapshot("initial_captcha")
-            logger.error("Consider:")
-            logger.error("  - Restart browser and retry")
-            logger.error("  - Add delay before retry")
-            logger.error("  - Check captcha solving methods")
-            logger.error("="*60)
-            return
+        except Exception as e:
+            # Exception during workflow - will retry
+            logger.error(f"❌ Exception during scraping: {str(e)[:200]}")
+            if scraper:
+                scraper.save_debug_snapshot(f"exception_attempt{attempt + 1}")
 
-        elif state == PageState.TIMEOUT:
-            logger.error("="*60)
-            logger.error("✗ TIMEOUT - Page failed to load")
-            scraper.save_debug_snapshot("initial_timeout")
-            logger.error("Consider:")
-            logger.error("  - Restart browser")
-            logger.error("  - Check network connection")
-            logger.error("  - Increase timeout values")
-            logger.error("="*60)
-            return
+            # Set retry from current page if known
+            if 'current_page' in locals():
+                start_page = current_page
+            logger.warning(f"Will retry from page {start_page}")
+            continue  # Next retry attempt
 
-        elif state == PageState.UNKNOWN:
-            logger.warning("="*60)
-            logger.warning("⚠️  UNKNOWN STATE - Unexpected page content")
-            scraper.save_debug_snapshot("initial_unknown")
-            logger.warning("Page loaded but doesn't match expected patterns")
-            logger.warning("="*60)
-            return
+        finally:
+            # Always close browser after each attempt
+            if scraper:
+                scraper.close_browser()
+                logger.debug("Browser closed")
 
-        logger.info("✓ Task completed successfully")
-
-    except Exception as e:
-        logger.error(f"✗ Task failed with exception: {e}")
-        if scraper:
-            scraper.save_debug_snapshot("exception")
-
-    finally:
-        # Always close browser
-        if scraper:
-            scraper.close_browser()
-            logger.info("✓ Browser closed")
+    # All retries exhausted
+    logger.error("="*60)
+    logger.error(f"❌ TASK FAILED after {MAX_RETRIES} attempts")
+    logger.error(f"Last attempted page: {start_page}")
+    logger.error("="*60)
 
 
 # ============================================================================
