@@ -65,7 +65,6 @@ for l in ["seleniumbase", "selenium", "pika"]: logging.getLogger(l).setLevel(log
 
 # Globals
 shutdown_event = threading.Event()
-redis_clients = None  # CHANGED: Now multiple Redis clients
 stats_lock = threading.Lock()
 total_stats = {'pages': 0, 'urls': 0, 'new': 0, 'price_changes': 0, 'duplicates': 0, 'errors': 0}  # CHANGED: Stats names
 
@@ -199,16 +198,15 @@ def scrape_task(task):
 
     try:
         # Create scraper with Redis clients
-        scraper = OlxScraper(redis_clients)
+        scraper = OlxScraper()
         scraper.init_browser(headless=False)
 
         logger.info(f"[{key}] Starting task...")
 
         # Navigate to page 1 with retries
-        page_1_url = scraper.get_page_url(task, 1)
-        nav_success = False
+        first_page = scraper.get_page_url(task, 1)
         for attempt in range(MAX_NAV_RETRIES):
-            if scraper.navigate(page_1_url):
+            if scraper.navigate(first_page):
                 nav_success = True
                 break
 

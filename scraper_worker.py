@@ -38,18 +38,10 @@ class OlxScraper:
     # INITIALIZATION - MODIFIED
     # ========================================================================
 
-    def __init__(self, redis_clients: dict):
+    def __init__(self):
         """
         Initialize scraper with new Redis clients.
-
-        Args:
-            redis_clients: Dict with 'scrape_session', 'processed_urls', 'url_stream', 'airtable_tasks' clients
         """
-        self.scrape_session = redis_clients['scrape_session']
-        self.processed_urls = redis_clients['processed_urls']
-        self.url_stream = redis_clients['url_stream']
-        self.airtable_tasks = redis_clients['airtable_tasks']
-        self.site_name = redis_clients['scrape_session'].site_name
         self.sb = None
 
         # Screenshot directory (environment variable for Docker compatibility)
@@ -58,9 +50,9 @@ class OlxScraper:
         # Ensure failed directory exists
         os.makedirs(self.FAILED_DIR, exist_ok=True)
 
-        logger.debug("Scraper initialized with Redis clients")
+        logger.debug("Scraper initialized")
 
-            # ========================================================================
+    # ========================================================================
     # BROWSER MANAGEMENT
     # ========================================================================
 
@@ -97,7 +89,7 @@ class OlxScraper:
 
                 if attempt < max_retries - 1:
                     # Exponential backoff: 1s, 2s, 4s
-                    wait_time = 2 ** attempt
+                    wait_time = 1.5 ** attempt
                     logger.info(f"Waiting {wait_time}s before retry...")
                     time.sleep(wait_time)
                 else:
@@ -125,6 +117,8 @@ class OlxScraper:
         try:
             logger.debug(f"Navigating to: {url}")
             self.sb.open(url)
+
+            # Not load or is captcha page or is no results page
 
             # Check for captcha BEFORE verifying page load
             if self.is_captcha_page():

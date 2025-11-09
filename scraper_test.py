@@ -69,24 +69,24 @@ class OlxScraper:
     # - restart_browser()
 
     # TODO: Navigation
-    # - navigate()
-    # - verify_page_loaded()
+    # - goto_url()
+    # - check_page_loaded()
 
     # TODO: Captcha handling
-    # - is_captcha_page()
+    # - check_captcha_page()
     # - handle_captcha()
 
     # TODO: Data extraction
-    # - extract_page_data()
-    # - detect_total_pages()
+    # - get_page_data()
+    # - get_total_pages()
 
     # TODO: Pagination
     # - click_next_page()
-    # - get_current_page_number()
+    # - get_page_number()
     # - get_page_url()
 
     # TODO: Utilities
-    # - is_no_results_page()
+    # - check_no_results_page()
 
 
 # ============================================================================
