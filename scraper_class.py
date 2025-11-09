@@ -65,7 +65,7 @@ class OlxScraper:
     # INITIALIZATION
     # ========================================================================
 
-    def __init__(self, redis_clients: dict = None):
+    def __init__(self, redis_clients: dict = None, redis_queue=None):
         """
         Initialize scraper with Redis clients for data persistence.
 
@@ -73,9 +73,13 @@ class OlxScraper:
             redis_clients: Dict with 'scrape_session', 'processed_urls',
                           'url_stream', 'airtable_tasks' clients
                           If None, runs in test mode without DB integration
+            redis_queue: Optional queue.Queue for async Redis writes
+                        If provided, store_urls_batch will queue instead of writing directly
         """
         # Redis clients (optional for testing)
         self.redis_clients = redis_clients
+        self.redis_queue = redis_queue  # Store queue for async Redis writes
+
         if redis_clients:
             self.scrape_session = redis_clients['scrape_session']
             self.processed_urls = redis_clients['processed_urls']
@@ -723,7 +727,10 @@ class OlxScraper:
         """
         Store URLs to Redis with deduplication and price change detection.
 
-        Deduplication logic:
+        If redis_queue is configured, queues the data for async processing by Redis writer thread.
+        Otherwise, processes synchronously with direct Redis calls.
+
+        Deduplication logic (when synchronous):
         1. Check scrape_session (within-run deduplication)
         2. Check processed_urls (historical deduplication)
         3. New URL → publish to stream
@@ -732,10 +739,11 @@ class OlxScraper:
 
         Args:
             url_price_pairs: List of (url, price) tuples
-            metadata: Optional metadata dict (unused, for compatibility)
+            metadata: Optional metadata dict (location, prop_type, etc.)
 
         Returns:
             Dict with stats: {'new': int, 'price_changes': int, 'duplicates': int}
+            Note: When using queue, stats are approximate (actual stats tracked by writer thread)
         """
         if not self.redis_clients:
             logger.debug("Redis not configured, skipping storage")
@@ -743,6 +751,15 @@ class OlxScraper:
 
         if not url_price_pairs:
             return {'new': 0, 'price_changes': 0, 'duplicates': 0}
+
+        # ASYNC MODE: Queue for Redis writer thread (non-blocking)
+        if self.redis_queue is not None:
+            logger.debug(f"📤 Queuing {len(url_price_pairs)} URLs for async Redis write")
+            self.redis_queue.put((url_price_pairs, metadata))
+            # Return immediately - actual stats will be tracked by writer thread
+            return {'new': 0, 'price_changes': 0, 'duplicates': 0}
+
+        # SYNC MODE: Direct Redis processing (original behavior)
 
         # Convert None prices to 0 (Redis doesn't accept None values)
         normalized_pairs = []
@@ -879,7 +896,7 @@ class OlxScraper:
 # PRODUCTION WORKFLOW - Task-Based Scraping with Retry
 # ============================================================================
 
-def scrape_task_with_retry(task: dict, redis_clients: dict, max_pages: int = 100):
+def scrape_task_with_retry(task: dict, redis_clients: dict, max_pages: int = 100, redis_queue=None):
     """
     Production workflow: scrape task with retry logic and Redis integration.
 
@@ -887,6 +904,7 @@ def scrape_task_with_retry(task: dict, redis_clients: dict, max_pages: int = 100
         task: Task dict with 'prop_type', 'transaction_type', 'location', 'task_id'
         redis_clients: Dict with Redis client instances
         max_pages: Maximum pages to scrape (default 100, respects site limit)
+        redis_queue: Optional queue.Queue for async Redis writes (if None, writes synchronously)
 
     Returns:
         Dict with stats: {'pages_scraped': int, 'urls_found': int, 'status': str}
@@ -901,13 +919,13 @@ def scrape_task_with_retry(task: dict, redis_clients: dict, max_pages: int = 100
     MAX_RETRIES = 3
     MAX_PAGES = max_pages
 
-    # Task stats
+    # Task stats (Note: URL stats updated by Redis writer thread if using queue)
     total_stats = {
         'pages_scraped': 0,
         'urls_found': 0,
-        'new_urls': 0,
-        'price_changes': 0,
-        'duplicates': 0,
+        'new_urls': 0,      # Only updated if NOT using queue
+        'price_changes': 0,  # Only updated if NOT using queue
+        'duplicates': 0,     # Only updated if NOT using queue
         'status': 'unknown'
     }
 
@@ -926,8 +944,8 @@ def scrape_task_with_retry(task: dict, redis_clients: dict, max_pages: int = 100
                 logger.info("="*60)
                 time.sleep(2)  # Brief delay before retry
 
-            # Initialize scraper with Redis clients
-            scraper = OlxScraper(redis_clients=redis_clients)
+            # Initialize scraper with Redis clients and optional queue
+            scraper = OlxScraper(redis_clients=redis_clients, redis_queue=redis_queue)
             logger.info("✓ Scraper instance created")
 
             # Initialize browser

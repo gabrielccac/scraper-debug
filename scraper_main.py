@@ -9,6 +9,7 @@ import logging
 import signal
 import sys
 import threading
+import queue
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from scraper_class import scrape_task_with_retry
 from redis_client import create_redis_clients
@@ -98,6 +99,9 @@ global_stats = {
     'duplicates': 0
 }
 
+# Redis writer queue - decouples network I/O from scraping
+redis_queue = queue.Queue(maxsize=1000)  # Buffer up to 1000 batches
+
 # ============================================================================
 # SIGNAL HANDLING
 # ============================================================================
@@ -109,6 +113,156 @@ def signal_handler(sig, frame):
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
+
+# ============================================================================
+# REDIS WRITER WORKER
+# ============================================================================
+
+def redis_writer_worker():
+    """
+    Background thread that consumes URL batches from queue and writes to Redis.
+
+    This decouples Redis network I/O from scraper threads, allowing scrapers
+    to continue immediately after extraction without blocking on Redis writes.
+
+    Workflow:
+    1. Scraper extracts URLs → puts (url_price_pairs, metadata) in queue
+    2. This worker pulls from queue → writes to Redis
+    3. Updates global stats with results
+    """
+    logger.info("🔌 Redis writer thread started")
+
+    while not shutdown_event.is_set():
+        try:
+            # Get batch from queue (timeout so we can check shutdown)
+            batch_data = redis_queue.get(timeout=1.0)
+
+            if batch_data is None:  # Poison pill for shutdown
+                break
+
+            url_price_pairs, metadata = batch_data
+
+            # Write to Redis (this blocks, but doesn't block scrapers!)
+            try:
+                # Call the Redis deduplication logic
+                batch_stats = _store_urls_to_redis(url_price_pairs, metadata)
+
+                # Update global stats
+                with stats_lock:
+                    global_stats['total_urls'] += len(url_price_pairs)
+                    global_stats['new_urls'] += batch_stats['new']
+                    global_stats['price_changes'] += batch_stats['price_changes']
+                    global_stats['duplicates'] += batch_stats['duplicates']
+
+                logger.debug(f"✓ Redis wrote {len(url_price_pairs)} URLs: "
+                           f"🆕{batch_stats['new']} 💰{batch_stats['price_changes']} "
+                           f"🔄{batch_stats['duplicates']}")
+
+            except Exception as e:
+                logger.error(f"Redis write error: {e}")
+
+            redis_queue.task_done()
+
+        except queue.Empty:
+            continue
+        except Exception as e:
+            logger.error(f"Redis writer unexpected error: {e}")
+
+    logger.info("🔌 Redis writer thread stopped")
+
+
+def _store_urls_to_redis(url_price_pairs: list, metadata: dict = None) -> dict:
+    """
+    Store URLs to Redis with deduplication and price change detection.
+
+    This is called by the Redis writer thread, not by scrapers directly.
+
+    Deduplication logic:
+    1. Check scrape_session (within-run deduplication)
+    2. Check processed_urls (cross-run deduplication + price changes)
+    3. Publish to url_stream + airtable_tasks as needed
+
+    Args:
+        url_price_pairs: List of (url, price) tuples
+        metadata: Optional metadata dict (location, prop_type, etc.)
+
+    Returns:
+        Dict with keys: new, price_changes, duplicates
+    """
+    if not url_price_pairs:
+        return {'new': 0, 'price_changes': 0, 'duplicates': 0}
+
+    # Build dict for batch operations
+    url_price_dict = {url: price for url, price in url_price_pairs}
+
+    # Step 1: Check scrape_session (HSETNX batch - only adds if new)
+    session_results = redis_clients['scrape_session'].add_urls_if_new_batch(url_price_dict)
+
+    # Step 2: For URLs new to this session, check processed_urls
+    new_in_session = [url for url, is_new in session_results.items() if is_new]
+
+    if not new_in_session:
+        # All duplicates within current session
+        return {'new': 0, 'price_changes': 0, 'duplicates': len(url_price_pairs)}
+
+    # Batch lookup in processed_urls
+    existing_processed = redis_clients['processed_urls'].get_urls_batch(new_in_session)
+
+    # Classify URLs
+    new_urls = []
+    price_changed_urls = []
+    stream_publish_list = []
+    airtable_publish_list = []
+
+    for url in new_in_session:
+        price = url_price_dict[url]
+
+        if url not in existing_processed:
+            # Completely new URL
+            new_urls.append(url)
+
+            # Update processed_urls with initial data
+            redis_clients['processed_urls'].update_url_price(url, price, metadata)
+
+            # Publish to streams
+            stream_publish_list.append((url, 'process'))
+            airtable_publish_list.append(('add', url))
+
+        else:
+            # URL exists, check price change
+            old_price = existing_processed[url].get('price')
+
+            if old_price is None or old_price != price:
+                price_changed_urls.append(url)
+
+                # Update price in processed_urls
+                redis_clients['processed_urls'].update_url_price(url, price, metadata)
+
+                # Publish price change tasks
+                stream_publish_list.append((url, 'process'))
+                airtable_publish_list.append(('update', url))
+
+    # Batch publish to Redis Stream
+    if stream_publish_list:
+        redis_clients['url_stream'].publish_urls_batch(stream_publish_list)
+
+    # Batch publish to Airtable tasks
+    if airtable_publish_list:
+        for action, url in airtable_publish_list:
+            redis_clients['airtable_tasks'].publish_task(
+                site=redis_clients['scrape_session'].site_name,
+                action=action,
+                url=url
+            )
+
+    # Calculate duplicates (URLs already in session)
+    duplicates = len(url_price_pairs) - len(new_in_session)
+
+    return {
+        'new': len(new_urls),
+        'price_changes': len(price_changed_urls),
+        'duplicates': duplicates
+    }
 
 # ============================================================================
 # TASK GENERATION
@@ -174,20 +328,18 @@ def execute_task(task: dict):
         return
 
     try:
-        # Execute task with new retry workflow
+        # Execute task with new retry workflow + queue for async Redis writes
         stats = scrape_task_with_retry(
             task=task,
             redis_clients=redis_clients,
-            max_pages=MAX_PAGES_PER_TASK
+            max_pages=MAX_PAGES_PER_TASK,
+            redis_queue=redis_queue  # Pass queue for async writes
         )
 
-        # Update global stats
+        # Update global stats (URLs stats handled by writer thread)
         with stats_lock:
             global_stats['total_pages'] += stats['pages_scraped']
-            global_stats['total_urls'] += stats['urls_found']
-            global_stats['new_urls'] += stats['new_urls']
-            global_stats['price_changes'] += stats['price_changes']
-            global_stats['duplicates'] += stats['duplicates']
+            # Note: total_urls, new_urls, price_changes, duplicates are updated by writer thread
 
             if stats['status'] == 'success':
                 global_stats['tasks_completed'] += 1
@@ -245,6 +397,18 @@ def main():
         sys.exit(1)
 
     # ========================================================================
+    # START REDIS WRITER THREAD
+    # ========================================================================
+
+    redis_writer_thread = threading.Thread(
+        target=redis_writer_worker,
+        daemon=True,
+        name="RedisWriter"
+    )
+    redis_writer_thread.start()
+    logger.info("✅ Redis writer thread started")
+
+    # ========================================================================
     # GENERATE TASKS
     # ========================================================================
 
@@ -296,6 +460,21 @@ def main():
     # ========================================================================
     # CLEANUP & STATS
     # ========================================================================
+
+    # Wait for Redis writer queue to drain
+    queue_size = redis_queue.qsize()
+    if queue_size > 0:
+        logger.info(f"⏳ Waiting for Redis queue to drain ({queue_size} batches pending)...")
+        redis_queue.join()  # Blocks until all items processed
+        logger.info("✅ Redis queue drained")
+
+    # Stop Redis writer thread gracefully
+    redis_queue.put(None)  # Poison pill
+    redis_writer_thread.join(timeout=10)
+    if redis_writer_thread.is_alive():
+        logger.warning("Redis writer thread did not stop cleanly")
+    else:
+        logger.info("✅ Redis writer thread stopped")
 
     # Log Redis stream stats
     if not shutdown_event.is_set():
