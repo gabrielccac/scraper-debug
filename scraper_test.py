@@ -64,9 +64,80 @@ class OlxScraper:
     # ========================================================================
 
     # TODO: Browser management
-    # - init_browser()
-    # - close_browser()
-    # - restart_browser()
+    def init_browser(self, max_retries: int = 3):
+        """
+        Initialize SeleniumBase browser instance with retry logic.
+
+        Args:
+            headless: Run in headless mode
+            max_retries: Maximum number of retry attempts (default 3)
+        """
+        for attempt in range(max_retries):
+            try:
+                self.sb = sb_cdp.Chrome(
+                    uc=True,
+                    headless=False,
+                    locale=self.BROWSER_LOCALE,
+                    window_size="1920,1080",
+                    ad_block=True,
+                )
+                logger.debug(f"Browser initialized successfully (attempt {attempt + 1}/{max_retries})")
+                return True
+
+            except Exception as e:
+                logger.warning(f"Browser init attempt {attempt + 1}/{max_retries} failed: {str(e)[:100]}")
+
+                # Cleanup failed browser instance before retry
+                try:
+                    if self.sb:
+                        self.sb.driver.quit()
+                        self.sb = None
+                except:
+                    pass
+
+                if attempt < max_retries - 1:
+                    # Exponential backoff: 1s, 2s, 4s
+                    wait_time = 1.5 ** attempt
+                    logger.info(f"Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Failed to initialize browser after {max_retries} attempts")
+                    raise
+
+        return False
+    
+    def close_browser(self):
+        """Safely close browser instance."""
+        try:
+            if self.sb:
+                self.sb.driver.stop()
+                logger.debug("Browser closed")
+        except Exception as e:
+            logger.debug(f"Error closing browser: {str(e)[:100]}")
+
+    def restart_browser(self) -> bool:
+        """
+        Close and reinitialize browser.
+
+        Returns:
+            True if restart successful
+        """
+        try:
+            logger.info("Restarting browser...")
+
+            # Close existing browser
+            self.close_browser()
+            time.sleep(1)
+
+            # Reinitialize browser
+            self.init_browser()
+
+            logger.info("Browser restarted successfully")
+            return True
+
+        except Exception as e:
+            logger.error(f"Browser restart failed: {str(e)[:100]}")
+            return False
 
     # TODO: Navigation
     # - goto_url()
