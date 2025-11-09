@@ -467,11 +467,6 @@ class OlxScraper:
                 # Store current URL to verify transition
                 current_url = self.sb.get_current_url()
 
-                # Click next page button
-                if not self.sb.is_element_present(self.NEXT_PAGE_BUTTON):
-                    logger.warning("Next page button not found")
-                    return PageState.UNKNOWN
-
                 logger.debug("Clicking next page button")
                 self.sb.click(self.NEXT_PAGE_BUTTON)
 
@@ -561,7 +556,7 @@ def scrape_task(url: str):
             logger.info("="*60)
 
             # Test pagination up to 10 pages
-            MAX_TEST_PAGES = 10
+            MAX_TEST_PAGES = 100
             current_page = 1
 
             logger.info(f"Starting pagination test (max {MAX_TEST_PAGES} pages)")
@@ -705,7 +700,7 @@ if __name__ == "__main__":
     print("="*60)
 
     # Test URL for development
-    TEST_URL = "https://www.olx.com.br/imoveis/venda/casas/estado-df/distrito-federal-e-regiao/brasilia/ra-xvi---lago-sul"
+    TEST_URL = "https://www.olx.com.br/imoveis/venda/casas/estado-df/distrito-federal-e-regiao"
 
     # Run scrape task
     scrape_task(TEST_URL)
