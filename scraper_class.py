@@ -9,10 +9,37 @@ import re
 import json
 import logging
 import os
+from functools import wraps
 from bs4 import BeautifulSoup
 from seleniumbase import sb_cdp
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# TIMING DECORATOR
+# ============================================================================
+
+def timing_decorator(func):
+    """
+    Decorator to measure and log function execution time.
+    Logs at INFO level with function name and elapsed time in seconds.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        elapsed = time.time() - start_time
+
+        # Get class name if this is a method
+        if args and hasattr(args[0].__class__, '__name__'):
+            class_name = args[0].__class__.__name__
+            logger.info(f"⏱️  {class_name}.{func.__name__}() took {elapsed:.3f}s")
+        else:
+            logger.info(f"⏱️  {func.__name__}() took {elapsed:.3f}s")
+
+        return result
+    return wrapper
 
 
 # ============================================================================
@@ -356,6 +383,7 @@ class OlxScraper:
             logger.debug(f"Error in _wait_for_element_js: {str(e)[:100]}")
             return False
 
+    @timing_decorator
     def check_page_resources(self) -> bool:
         """
         Check if all required page resources are present using JS evaluation.
@@ -465,6 +493,7 @@ class OlxScraper:
         logger.error("🚫 All captcha solving methods failed")
         return False
 
+    @timing_decorator
     def get_page_state(self, base_load_timeout: int = 5) -> str:
         """
         Determine current page state after navigation.
@@ -535,6 +564,7 @@ class OlxScraper:
         logger.debug(f"URL didn't change within {timeout}s")
         return False
 
+    @timing_decorator
     def goto_url(self, url: str, max_retries: int = 2) -> str:
         """
         Navigate to URL and determine page state.
@@ -577,6 +607,7 @@ class OlxScraper:
 
         return PageState.TIMEOUT
 
+    @timing_decorator
     def goto_next_page(self, max_retries: int = 2) -> str:
         """
         Click next page button and verify page transition.
@@ -657,6 +688,7 @@ class OlxScraper:
             logger.error(f"Error extracting page number: {str(e)[:100]}")
             return 1
 
+    @timing_decorator
     def get_page_data(self) -> list:
         """
         Extract listing URLs with prices using JS to get HTML.
@@ -780,6 +812,7 @@ class OlxScraper:
     # REDIS STORAGE (Production Only)
     # ========================================================================
 
+    @timing_decorator
     def store_urls_batch(self, url_price_pairs: list, metadata: dict = None) -> dict:
         """
         Store URLs to Redis with deduplication and price change detection.
