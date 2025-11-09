@@ -543,7 +543,7 @@ class OlxScraper:
                         continue
 
                 # Return state (SUCCESS, NO_RESULTS, CAPTCHA, TIMEOUT, UNKNOWN)
-                logger.info(f"✓ Navigation complete: {state}")
+                # logger.info(f"✓ Navigation complete: {state}")
                 return state
 
             except Exception as e:
@@ -595,7 +595,7 @@ class OlxScraper:
                         logger.info("Retrying next page click...")
                         continue
 
-                logger.info(f"✓ Next page navigation complete: {state}")
+                # logger.info(f"✓ Next page navigation complete: {state}")
                 return state
 
             except Exception as e:

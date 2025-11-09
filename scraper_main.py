@@ -9,7 +9,7 @@ import signal
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
-from scraper_test import OlxScraper, PageState
+from scraper_class import OlxScraper, PageState
 from redis_client import create_redis_clients
 
 # ============================================================================
@@ -17,13 +17,13 @@ from redis_client import create_redis_clients
 # ============================================================================
 
 SITE_NAME = "olx"
-MAX_WORKERS = 3
+MAX_WORKERS = 2
 
 LOCATIONS = [
     "",  # Base state-level
     "/distrito-federal-e-regiao",
     "/distrito-federal-e-regiao/brasilia",
-    "/distrito-federal-e-regiao/outras-cidades",
+    # "/distrito-federal-e-regiao/outras-cidades",
     "/distrito-federal-e-regiao/outras-cidades/formosa",
     "/distrito-federal-e-regiao/outras-cidades/novo-gama",
     "/distrito-federal-e-regiao/outras-cidades/valparaiso-de-goias",
