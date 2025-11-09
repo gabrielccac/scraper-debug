@@ -1,8 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-OLX Scraper - Multi-threaded Main Orchestrator
-Generates tasks and runs them in parallel using ThreadPoolExecutor
+OLX Scraper - Multi-threaded Task-Based Orchestrator
 """
 import time
 import logging
@@ -16,18 +15,55 @@ from scraper_test import OlxScraper, PageState
 # CONFIGURATION
 # ============================================================================
 
-MAX_WORKERS = 2  # Number of parallel browser instances
-PAGES_PER_TASK = 50  # Pages to scrape per task
-MAX_PAGES = 100  # Maximum pages per URL (OLX limit)
+SITE_NAME = "olx"
+MAX_WORKERS = 3
 
-# Transaction types to scrape
+LOCATIONS = [
+    "",  # Base state-level
+    "/distrito-federal-e-regiao",
+    "/distrito-federal-e-regiao/brasilia",
+    "/distrito-federal-e-regiao/outras-cidades",
+    "/distrito-federal-e-regiao/outras-cidades/formosa",
+    "/distrito-federal-e-regiao/outras-cidades/novo-gama",
+    "/distrito-federal-e-regiao/outras-cidades/valparaiso-de-goias",
+    "/distrito-federal-e-regiao/outras-cidades/cidade-ocidental",
+    "/distrito-federal-e-regiao/outras-cidades/santo-antonio-do-descoberto",
+    "/distrito-federal-e-regiao/outras-cidades/luziania",
+    "/distrito-federal-e-regiao/outras-cidades/aguas-lindas-de-goias",
+    "/distrito-federal-e-regiao/brasilia/ra-xvii---riacho-fundo-i",
+    "/distrito-federal-e-regiao/brasilia/ra-xv---recanto-das-emas",
+    "/distrito-federal-e-regiao/brasilia/ra-x---guara",
+    "/distrito-federal-e-regiao/brasilia/ra-xii---samambaia",
+    "/distrito-federal-e-regiao/brasilia/ra-viii---nucleo-bandeirante",
+    "/distrito-federal-e-regiao/brasilia/ra-xiv---sao-sebastiao",
+    "/distrito-federal-e-regiao/brasilia/ra-iv---brazlandia",
+    "/distrito-federal-e-regiao/brasilia/ra-vi---planaltina",
+    "/distrito-federal-e-regiao/brasilia/ra-vii---paranoa",
+    "/distrito-federal-e-regiao/brasilia/ra-xxx---vicente-pires",
+    "/distrito-federal-e-regiao/brasilia/ra-xx---aguas-claras",
+    "/distrito-federal-e-regiao/brasilia/ra-xix---candangolandia",
+    "/distrito-federal-e-regiao/brasilia/ra-ix---ceilandia",
+    "/distrito-federal-e-regiao/brasilia/ra-xxiv---park-way",
+    "/distrito-federal-e-regiao/brasilia/ra-xxii---sudoeste-e-octogonal",
+    "/distrito-federal-e-regiao/brasilia/ra-v---sobradinho",
+    "/distrito-federal-e-regiao/brasilia/ra-xi---cruzeiro",
+    "/distrito-federal-e-regiao/brasilia/ra-xxvii---jardim-botanico",
+    "/distrito-federal-e-regiao/brasilia/ra-ii---gama",
+    "/distrito-federal-e-regiao/brasilia/ra-xviii---lago-norte",
+    "/distrito-federal-e-regiao/brasilia/ra-xxviii---itapoa",
+    "/distrito-federal-e-regiao/brasilia/ra-i---brasilia",
+    "/distrito-federal-e-regiao/brasilia/ra-xxi---riacho-fundo-ii",
+    "/distrito-federal-e-regiao/brasilia/ra-xiii---santa-maria",
+    "/distrito-federal-e-regiao/brasilia/ra-xvi---lago-sul",
+    "/distrito-federal-e-regiao/brasilia/ra-iii---taguatinga"
+]
+
+PROPERTY_TYPES = ["apartamentos", "casas"]
+
 TRANSACTION_TYPES = ["venda", "aluguel"]
 
-# Sample regions to scrape (can be expanded)
-REGIONS = [
-    "estado-df/distrito-federal-e-regiao/brasilia/ra-xvi---lago-sul",
-    "estado-df/distrito-federal-e-regiao/brasilia/ra-i---plano-piloto"
-]
+MAX_RETRIES = 3
+MAX_NAV_RETRIES = 3  # Retries for navigation failures
 
 # ============================================================================
 # LOGGING SETUP
@@ -51,9 +87,8 @@ for lib in ["seleniumbase", "selenium", "urllib3"]:
 shutdown_event = threading.Event()
 stats_lock = threading.Lock()
 total_stats = {
-    'tasks_completed': 0,
-    'pages_scraped': 0,
-    'urls_found': 0,
+    'pages': 0,
+    'urls': 0,
     'errors': 0
 }
 
@@ -63,7 +98,7 @@ total_stats = {
 
 def signal_handler(sig, frame):
     """Handle shutdown signals gracefully"""
-    logger.info("⚠️  Shutdown requested - finishing current tasks...")
+    logger.info("Shutdown requested")
     shutdown_event.set()
 
 signal.signal(signal.SIGINT, signal_handler)
@@ -75,17 +110,17 @@ signal.signal(signal.SIGTERM, signal_handler)
 
 def generate_tasks() -> list:
     """
-    Generate scraping tasks from configuration.
+    Generate simple task list without page detection.
 
-    Each task contains:
-    - transaction_type: "venda" or "aluguel"
-    - region: URL path to region
-    - start_page: First page to scrape
-    - end_page: Last page to scrape
-    - task_key: Unique identifier
+    Each task represents a complete scraping job for:
+    - One location
+    - One property type
+    - One transaction type
+
+    Workers will detect pages at runtime (max 100 for OLX).
 
     Returns:
-        List of task dictionaries
+        List of task dicts with keys: location, prop_type, transaction_type, task_key
     """
     logger.info("="*60)
     logger.info("📋 GENERATING TASKS")
@@ -93,28 +128,22 @@ def generate_tasks() -> list:
 
     tasks = []
 
-    for transaction in TRANSACTION_TYPES:
-        for region in REGIONS:
-            # For now, create one task per region/transaction
-            # (In future, could split into chunks based on detection)
+    for location in LOCATIONS:
+        for prop_type in PROPERTY_TYPES:
+            for transaction_type in TRANSACTION_TYPES:
+                # Use "base" for empty location to avoid leading underscore in task_key
+                location_name = location if location else "base"
 
-            # Build base URL
-            base_url = f"https://www.olx.com.br/imoveis/{transaction}/{region}"
+                task = {
+                    'location': location,  # Keep original (empty string) for URL building
+                    'prop_type': prop_type,
+                    'transaction_type': transaction_type,
+                    'task_key': f"{location_name}_{prop_type}_{transaction_type}"
+                }
+                tasks.append(task)
 
-            task = {
-                'transaction_type': transaction,
-                'region': region,
-                'base_url': base_url,
-                'start_page': 1,
-                'end_page': PAGES_PER_TASK,
-                'task_key': f"{transaction}_{region.split('/')[-1]}"
-            }
-
-            tasks.append(task)
-            logger.info(f"✓ Task: {task['task_key']} (pages 1-{PAGES_PER_TASK})")
-
-    logger.info("="*60)
     logger.info(f"✓ Generated {len(tasks)} tasks")
+    logger.info(f"  Locations: {len(LOCATIONS)} | Property Types: {len(PROPERTY_TYPES)} | Transactions: {len(TRANSACTION_TYPES)}")
     logger.info("="*60)
 
     return tasks
@@ -123,104 +152,156 @@ def generate_tasks() -> list:
 # TASK EXECUTION
 # ============================================================================
 
-def scrape_task_worker(task: dict):
+def scrape_task(task: dict):
     """
-    Worker function to scrape a single task.
+    Scrape all pages for a single task (location + prop_type + transaction_type).
+
+    Each worker handles the complete task:
+    1. Navigate to page 1
+    2. Detect total pages (max 100 for OLX)
+    3. Scrape pages 1 through total_pages
 
     Args:
-        task: Task dictionary with scraping parameters
+        task: Dict with 'location', 'prop_type', 'transaction_type', 'task_key'
     """
-    task_key = task['task_key']
-    base_url = task['base_url']
-    start_page = task['start_page']
-    end_page = task['end_page']
-
+    key = task['task_key']
     scraper = None
-    pages_scraped = 0
-    urls_found = 0
 
     try:
-        logger.info(f"[{task_key}] Starting task: {base_url}")
-
-        # Initialize scraper
+        # Create scraper
         scraper = OlxScraper()
         scraper.init_browser()
 
-        # Navigate to first page
-        if start_page == 1:
-            url = base_url
-        else:
-            url = f"{base_url}?o={start_page}"
+        logger.info(f"[{key}] Starting task...")
 
-        state = scraper.goto_url(url)
+        # Navigate to page 1 with retries
+        page_1_url = scraper.get_page_url(task, 1)
+        nav_success = False
+        for attempt in range(MAX_NAV_RETRIES):
+            state = scraper.goto_url(page_1_url)
 
-        if state == PageState.NO_RESULTS:
-            logger.warning(f"[{task_key}] No results found")
-            return
+            if state == PageState.SUCCESS:
+                nav_success = True
+                break
+            elif state == PageState.NO_RESULTS:
+                logger.warning(f"[{key}] No results found")
+                return
 
-        if state != PageState.SUCCESS:
-            logger.error(f"[{task_key}] Failed to load first page: {state}")
+            logger.warning(f"[{key}] Navigation attempt {attempt+1}/{MAX_NAV_RETRIES} failed: {state}")
+
+            if attempt < MAX_NAV_RETRIES - 1:
+                logger.info(f"[{key}] Restarting browser and retrying...")
+                scraper.restart_browser()
+
+        if not nav_success:
+            logger.error(f"[{key}] Failed to navigate to page 1 after {MAX_NAV_RETRIES} attempts, skipping task")
             with stats_lock:
                 total_stats['errors'] += 1
             return
 
-        # Scrape pages
-        current_page = start_page
+        # Detect total pages (max 100 for OLX)
+        total_pages = scraper.get_total_pages()
 
-        while current_page <= end_page:
+        if total_pages == 0:
+            logger.warning(f"[{key}] No pages detected, skipping task")
+            with stats_lock:
+                total_stats['errors'] += 1
+            return
+
+        logger.info(f"[{key}] Detected {total_pages} pages, starting scrape")
+
+        # Loop through all pages (starting from page 1, already loaded)
+        for page in range(1, total_pages + 1):
             if shutdown_event.is_set():
-                logger.info(f"[{task_key}] Shutdown requested at page {current_page}")
+                logger.info(f"[{key}] Shutdown requested at page {page}")
                 break
 
-            # Extract data from current page
-            page_data = scraper.get_page_data()
+            # Extract URLs from current page with retry logic
+            urls = []
+            for attempt in range(MAX_RETRIES):
+                try:
+                    urls = scraper.get_page_data()
+                    if urls:
+                        break
+                except Exception as e:
+                    logger.error(f"[{key}] Page {page} extraction error (attempt {attempt+1}): {e}")
 
-            if page_data:
-                pages_scraped += 1
-                urls_found += len(page_data)
+                if attempt < MAX_RETRIES - 1:
+                    logger.debug(f"[{key}] Restarting browser and retrying page {page}")
+                    scraper.restart_browser()
+                    scraper.goto_url(scraper.get_page_url(task, page))
+
+            # Check for "no results" page - stop scraping if detected
+            if scraper.check_no_results_page():
+                logger.warning(f"[{key}] Page {page}/{total_pages}: 'No results' message detected - stopping early")
+                break
+
+            # Log URLs found
+            if urls:
+                with stats_lock:
+                    total_stats['urls'] += len(urls)
+                    total_stats['pages'] += 1
 
                 # Log sample URLs (first 3)
-                sample_urls = [url for url, price in page_data[:3]]
-                logger.info(f"[{task_key}] Page {current_page}: {len(page_data)} URLs found")
+                sample_urls = [url for url, price in urls[:3]]
+                logger.info(f"[{key}] Page {page}/{total_pages}: {len(urls)} URLs")
                 for url in sample_urls:
                     logger.debug(f"  - {url}")
             else:
-                logger.warning(f"[{task_key}] Page {current_page}: No data extracted")
                 with stats_lock:
                     total_stats['errors'] += 1
+                logger.warning(f"[{key}] Page {page}/{total_pages}: No URLs extracted after {MAX_RETRIES} attempts")
 
-            # Navigate to next page if not at end
-            if current_page < end_page:
+            # Navigate to next page (if not last page)
+            if page < total_pages:
+                expected_next_page = page + 1
+
+                time.sleep(1)  # Polite delay
+
                 state = scraper.goto_next_page()
 
                 if state == PageState.SUCCESS:
-                    current_page += 1
+                    # Verify we're on expected page
+                    actual_page = scraper.get_page_number()
+                    if actual_page != expected_next_page:
+                        logger.warning(f"[{key}] Page mismatch: expected {expected_next_page}, got {actual_page}")
+                        # Try direct navigation
+                        scraper.goto_url(scraper.get_page_url(task, expected_next_page))
                 elif state == PageState.NO_RESULTS:
-                    logger.info(f"[{task_key}] Reached end of results at page {current_page}")
+                    logger.info(f"[{key}] Reached end at page {page}")
                     break
                 else:
-                    logger.error(f"[{task_key}] Navigation failed at page {current_page}: {state}")
-                    with stats_lock:
-                        total_stats['errors'] += 1
-                    break
+                    logger.warning(f"[{key}] Navigation failed, using direct URL for page {expected_next_page}")
+                    next_page_url = scraper.get_page_url(task, expected_next_page)
 
-                time.sleep(1)  # Polite delay between pages
-            else:
-                current_page += 1
+                    # Try navigation with retries
+                    nav_success = False
+                    for attempt in range(MAX_NAV_RETRIES):
+                        state = scraper.goto_url(next_page_url)
+                        if state == PageState.SUCCESS:
+                            nav_success = True
+                            break
 
-        # Update stats
-        with stats_lock:
-            total_stats['tasks_completed'] += 1
-            total_stats['pages_scraped'] += pages_scraped
-            total_stats['urls_found'] += urls_found
+                        logger.warning(f"[{key}] Navigation attempt {attempt+1}/{MAX_NAV_RETRIES} failed for page {expected_next_page}")
 
-        logger.info(f"[{task_key}] ✓ Complete: {pages_scraped} pages, {urls_found} URLs")
+                        if attempt < MAX_NAV_RETRIES - 1:
+                            logger.info(f"[{key}] Restarting browser and retrying...")
+                            scraper.restart_browser()
+
+                    if not nav_success:
+                        logger.error(f"[{key}] Failed to navigate to page {expected_next_page} after {MAX_NAV_RETRIES} attempts, stopping task")
+                        with stats_lock:
+                            total_stats['errors'] += 1
+                        break
+
+                time.sleep(1)
+
+        logger.info(f"[{key}] Complete - scraped {page}/{total_pages} pages")
 
     except Exception as e:
-        logger.error(f"[{task_key}] ✗ Task failed: {str(e)[:200]}")
+        logger.error(f"[{key}] Failed: {e}")
         with stats_lock:
             total_stats['errors'] += 1
-
     finally:
         if scraper:
             try:
@@ -235,19 +316,15 @@ def scrape_task_worker(task: dict):
 def main():
     """Main orchestrator - generates tasks and runs them in parallel"""
 
-    print("\n" + "="*60)
-    print("OLX SCRAPER - MULTI-THREADED ORCHESTRATOR")
-    print("="*60)
-    print(f" Workers: {MAX_WORKERS}")
-    print(f" Transactions: {len(TRANSACTION_TYPES)}")
-    print(f" Regions: {len(REGIONS)}")
-    print(f" Pages per task: {PAGES_PER_TASK}")
-    print("="*60 + "\n")
+    print(f"\n{'='*60}\n {SITE_NAME.upper()} SCRAPER - TASK-BASED WORKFLOW\n{'='*60}")
+    print(f" Workers: {MAX_WORKERS} | Locations: {len(LOCATIONS)} | Transactions: {len(TRANSACTION_TYPES)} | Types: {len(PROPERTY_TYPES)}")
+    print(f" Max Pages per Task: 100 (OLX limit)")
+    print(f"{'='*60}\n")
 
     start_time = time.time()
 
     # ========================================================================
-    # PHASE 1: Generate Tasks
+    # GENERATE TASKS
     # ========================================================================
 
     tasks = generate_tasks()
@@ -257,7 +334,7 @@ def main():
         sys.exit(1)
 
     # ========================================================================
-    # PHASE 2: Execute Tasks in Parallel
+    # EXECUTE TASKS IN PARALLEL
     # ========================================================================
 
     logger.info("="*60)
@@ -268,32 +345,28 @@ def main():
 
     try:
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(scrape_task_worker, task): task for task in tasks}
+            futures = {executor.submit(scrape_task, task): task for task in tasks}
 
             while futures:
                 if shutdown_event.is_set():
-                    # Cancel remaining tasks
                     for f in futures:
                         f.cancel()
                     break
 
-                # Wait for any task to complete
                 done, not_done = wait(futures, timeout=1.0, return_when=FIRST_COMPLETED)
 
                 for f in done:
                     try:
                         f.result()
                         completed += 1
-                        logger.info(f"📊 Progress: {completed}/{len(tasks)} tasks complete")
+                        logger.info(f"Progress: {completed}/{len(tasks)} tasks complete")
                     except Exception as e:
                         logger.error(f"Task error: {e}")
                         completed += 1
 
-                # Update futures dict to only track not done
                 futures = {f: futures[f] for f in not_done}
 
     except KeyboardInterrupt:
-        logger.warning("⚠️  Keyboard interrupt - shutting down...")
         shutdown_event.set()
 
     # ========================================================================
@@ -302,15 +375,12 @@ def main():
 
     elapsed = time.time() - start_time
 
-    print("\n" + "="*60)
-    print("SCRAPING COMPLETE")
-    print("="*60)
+    print(f"\n{'='*60}\n SCRAPING COMPLETE\n{'='*60}")
     print(f" Time: {elapsed:.1f}s ({elapsed/60:.1f} min)")
-    print(f" Tasks: {total_stats['tasks_completed']}/{len(tasks)} completed")
-    print(f" Pages: {total_stats['pages_scraped']:,}")
-    print(f" URLs: {total_stats['urls_found']:,}")
+    print(f" Tasks: {completed}/{len(tasks)} completed")
+    print(f" Pages: {total_stats['pages']:,} | URLs: {total_stats['urls']:,}")
     print(f" Errors: {total_stats['errors']}")
-    print("="*60 + "\n")
+    print(f"{'='*60}\n")
 
 # ============================================================================
 # ENTRY POINT
@@ -320,5 +390,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
+        logger.error(f"Fatal: {e}", exc_info=True)
         sys.exit(1)

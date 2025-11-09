@@ -733,6 +733,40 @@ class OlxScraper:
             logger.error(f"Error detecting total pages: {str(e)[:100]}")
             return 0
 
+    def get_page_url(self, task: dict, page_num: int) -> str:
+        """
+        Construct URL for a specific page number for OLX.
+
+        Pattern: https://www.olx.com.br/imoveis/{transaction}/{prop_type}/estado-df{location}?o={page}
+
+        Examples:
+            - https://www.olx.com.br/imoveis/venda/apartamentos/estado-df?o=2
+            - https://www.olx.com.br/imoveis/aluguel/casas/estado-df/distrito-federal-e-regiao/brasilia?o=5
+            - https://www.olx.com.br/imoveis/venda/casas/estado-df/distrito-federal-e-regiao/outras-cidades/ra-x---guara?o=3
+
+        Args:
+            task: Task dict with 'prop_type', 'transaction_type', 'location'
+            page_num: Page number (1-based)
+
+        Returns:
+            Formatted URL string
+        """
+        prop_type = task['prop_type']
+        transaction_type = task['transaction_type']
+        location = task.get('location', '')  # Location can be empty string for state-level
+
+        # Build base URL following OLX pattern
+        if location:
+            base_url = f"https://www.olx.com.br/imoveis/{transaction_type}/{prop_type}/estado-df{location}"
+        else:
+            base_url = f"https://www.olx.com.br/imoveis/{transaction_type}/{prop_type}/estado-df"
+
+        # Add page parameter if not first page
+        if page_num > 1:
+            base_url += f"?o={page_num}"
+
+        return base_url
+
 
 # ============================================================================
 # SCRAPE TASK - Main workflow function
