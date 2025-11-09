@@ -236,32 +236,41 @@ class OlxScraper:
             logger.debug(f"Error checking no results: {str(e)[:100]}")
             return False
 
-    def check_listings_present(self) -> bool:
+    def check_page_resources(self) -> bool:
         """
-        Check if listing elements are present on page.
+        Check if all required page resources are present.
 
-        Verifies both:
-        - Listing container exists
-        - At least one listing card exists
+        Verifies all required elements:
+        - Listing container
+        - At least one listing card
+        - Next page button
 
         Returns:
-            True if listings found
+            True if all resources found, False otherwise
         """
+        required_elements = [
+            (self.PAGE_LOADED_SELECTOR, "Listing container"),
+            (self.LISTING_CARD_SELECTOR, "Listing card"),
+            (self.NEXT_PAGE_BUTTON, "Next page button")
+        ]
+
         try:
-            # Check for listing container
-            if not self.sb.is_element_present(self.PAGE_LOADED_SELECTOR):
-                logger.debug(f"Listing container not found: {self.PAGE_LOADED_SELECTOR}")
+            missing = []
+
+            for selector, name in required_elements:
+                if not self.sb.is_element_present(selector):
+                    logger.debug(f"{name} not found: {selector}")
+                    missing.append(name)
+
+            if missing:
+                logger.debug(f"Missing elements: {', '.join(missing)}")
                 return False
 
-            # Check for at least one listing card
-            if not self.sb.is_element_present(self.LISTING_CARD_SELECTOR):
-                logger.debug(f"No listing cards found: {self.LISTING_CARD_SELECTOR}")
-                return False
-
+            logger.debug("✓ All page resources present")
             return True
 
         except Exception as e:
-            logger.debug(f"Error checking listings: {str(e)[:100]}")
+            logger.debug(f"Error checking page resources: {str(e)[:100]}")
             return False
 
     def handle_captcha(self, max_wait: int = 60) -> bool:
@@ -377,9 +386,9 @@ class OlxScraper:
                     logger.info("No results page detected")
                     return PageState.NO_RESULTS
 
-                # 4. Check listings present (expected success state)
-                if self.check_listings_present():
-                    logger.info("✓ Listings found on page")
+                # 4. Check all page resources present (expected success state)
+                if self.check_page_resources():
+                    logger.info("✓ All page resources present")
                     return PageState.SUCCESS
 
                 # Unknown state - page loaded but unexpected content
