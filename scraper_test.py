@@ -207,12 +207,13 @@ class OlxScraper:
 
     def _wait_for_base_load(self, timeout: int = 10) -> bool:
         """
-        Ensure basic page load before checking page state.
+        Ensure basic page load before checking page state using JS evaluation.
 
         Verifies:
         - Body element exists
         - Not on about:blank
         - Page title exists and not empty
+        - Not a captcha page
 
         Args:
             timeout: Time to wait for base load
@@ -220,28 +221,42 @@ class OlxScraper:
         Returns:
             True if page has basic content loaded
         """
-        try:
-            # Wait for body tag
-            self.sb.wait_for_element("body", timeout=timeout)
+        start_time = time.time()
 
-            # Check we're not on about:blank
-            current_url = self.sb.get_current_url()
-            if "about:blank" in current_url:
-                logger.debug("Still on about:blank")
-                return False
+        while time.time() - start_time < timeout:
+            try:
+                # Check if body exists via JS
+                body_exists = self.sb.evaluate("return document.body !== null")
 
-            # Check title exists and not empty
-            title = self.sb.get_title()
-            if not title or len(title) == 0:
-                logger.debug("Page title is empty")
-                return False
+                # Check URL is not about:blank via JS
+                current_url = self.sb.evaluate("return window.location.href")
+                url_loaded = current_url and "about:blank" not in current_url.lower()
 
-            logger.debug(f"Base page loaded: {title[:50]}")
-            return True
+                # Check if title is loaded via JS
+                title = self.sb.evaluate("return document.title")
+                title_loaded = title and len(title) > 0 and title.lower() != "about:blank"
 
-        except Exception as e:
-            logger.debug(f"Base load check failed: {str(e)[:100]}")
-            return False
+                # Check if it's a captcha page
+                is_captcha = False
+                if title:
+                    for keyword in self.CAPTCHA_TITLE_KEYWORDS:
+                        if keyword in title:
+                            is_captcha = True
+                            break
+
+                # All conditions met and not captcha
+                if body_exists and url_loaded and title_loaded and not is_captcha:
+                    logger.debug(f"Base page loaded: {title[:50]}")
+                    return True
+
+            except Exception as e:
+                # Continue waiting if evaluation fails
+                logger.debug(f"Base load evaluation failed: {str(e)[:100]}")
+
+            time.sleep(0.1)  # Poll every 100ms
+
+        logger.debug(f"Base load timeout after {timeout}s")
+        return False
 
     def check_captcha_page(self) -> bool:
         """
@@ -285,42 +300,62 @@ class OlxScraper:
             logger.debug(f"Error checking no results: {str(e)[:100]}")
             return False
 
-    def check_page_resources(self) -> bool:
+    def check_page_resources(self, timeout: int = 5) -> bool:
         """
-        Check if all required page resources are present.
+        Check if all required page resources are present using JS evaluation with polling.
 
         Verifies all required elements:
         - Listing container
         - At least one listing card
         - Next page button
 
+        Args:
+            timeout: Time to wait for all resources (default 5s)
+
         Returns:
             True if all resources found, False otherwise
         """
-        required_elements = [
-            (self.PAGE_LOADED_SELECTOR, "Listing container"),
-            (self.LISTING_CARD_SELECTOR, "Listing card"),
-            (self.NEXT_PAGE_BUTTON, "Next page button")
+        # Define checks with JS evaluation code
+        required_checks = [
+            (f"return document.querySelector('{self.PAGE_LOADED_SELECTOR}') !== null", "Listing container"),
+            (f"return document.querySelector('{self.LISTING_CARD_SELECTOR}') !== null", "Listing card"),
+            (f"return document.evaluate('{self.NEXT_PAGE_BUTTON}', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue !== null", "Next page button")
         ]
 
-        try:
-            missing = []
+        start_time = time.time()
 
-            for selector, name in required_elements:
-                if not self.sb.is_element_present(selector):
-                    logger.debug(f"{name} not found: {selector}")
-                    missing.append(name)
+        while time.time() - start_time < timeout:
+            try:
+                all_present = True
+                missing = []
 
-            if missing:
-                logger.debug(f"Missing elements: {', '.join(missing)}")
-                return False
+                for js_code, name in required_checks:
+                    try:
+                        element_exists = self.sb.evaluate(js_code)
+                        if not element_exists:
+                            logger.debug(f"{name} not found yet")
+                            missing.append(name)
+                            all_present = False
+                    except Exception as e:
+                        logger.debug(f"Error checking {name}: {str(e)[:50]}")
+                        missing.append(name)
+                        all_present = False
 
-            logger.debug("✓ All page resources present")
-            return True
+                if all_present:
+                    logger.debug("✓ All page resources present")
+                    return True
 
-        except Exception as e:
-            logger.debug(f"Error checking page resources: {str(e)[:100]}")
-            return False
+                # If not all present, log missing and continue polling
+                if missing:
+                    logger.debug(f"Missing elements: {', '.join(missing)}")
+
+            except Exception as e:
+                logger.debug(f"Error in resource check iteration: {str(e)[:100]}")
+
+            time.sleep(0.1)  # Poll every 100ms
+
+        logger.debug(f"Page resources timeout after {timeout}s")
+        return False
 
     def handle_captcha(self, max_wait: int = 30) -> bool:
         """
