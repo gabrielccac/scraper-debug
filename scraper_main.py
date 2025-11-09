@@ -10,6 +10,7 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from scraper_test import OlxScraper, PageState
+from redis_client import create_redis_clients
 
 # ============================================================================
 # CONFIGURATION
@@ -85,10 +86,14 @@ for lib in ["seleniumbase", "selenium", "urllib3"]:
 # ============================================================================
 
 shutdown_event = threading.Event()
+redis_clients = None
 stats_lock = threading.Lock()
 total_stats = {
     'pages': 0,
     'urls': 0,
+    'new': 0,
+    'price_changes': 0,
+    'duplicates': 0,
     'errors': 0
 }
 
@@ -181,8 +186,8 @@ def scrape_task(task: dict):
                 logger.info(f"[{key}] 🔄 RETRY ATTEMPT {attempt + 1}/{MAX_RETRIES} from page {start_page}")
                 time.sleep(2)  # Brief delay before retry
 
-            # Initialize scraper
-            scraper = OlxScraper()
+            # Initialize scraper with Redis clients
+            scraper = OlxScraper(redis_clients)
             scraper.init_browser()
             logger.debug(f"[{key}] Browser initialized")
 
@@ -217,11 +222,18 @@ def scrape_task(task: dict):
             page_num = scraper.get_page_number()
             page_data = scraper.get_page_data()
 
+            # Store URLs with metadata
+            metadata = {'location': task['location'], 'prop_type': task['prop_type'], 'transaction_type': task['transaction_type']}
+
             if page_data:
+                stats = scraper.store_urls_batch(page_data, metadata)
                 with stats_lock:
                     total_stats['urls'] += len(page_data)
+                    total_stats['new'] += stats['new']
+                    total_stats['price_changes'] += stats['price_changes']
+                    total_stats['duplicates'] += stats['duplicates']
                     total_stats['pages'] += 1
-                logger.info(f"[{key}] Page {page_num}: {len(page_data)} URLs")
+                logger.info(f"[{key}] Page {page_num}: {len(page_data)} URLs | 🆕{stats['new']} 💰{stats['price_changes']} 🔄{stats['duplicates']}")
 
             # Detect total pages (only on first attempt from page 1)
             if attempt == 0 and start_page == 1:
@@ -277,10 +289,14 @@ def scrape_task(task: dict):
                     page_data = scraper.get_page_data()
 
                     if page_data:
+                        stats = scraper.store_urls_batch(page_data, metadata)
                         with stats_lock:
                             total_stats['urls'] += len(page_data)
+                            total_stats['new'] += stats['new']
+                            total_stats['price_changes'] += stats['price_changes']
+                            total_stats['duplicates'] += stats['duplicates']
                             total_stats['pages'] += 1
-                        logger.info(f"[{key}] Page {page_num}: {len(page_data)} URLs")
+                        logger.info(f"[{key}] Page {page_num}: {len(page_data)} URLs | 🆕{stats['new']} 💰{stats['price_changes']} 🔄{stats['duplicates']}")
 
                 elif next_state == PageState.NO_RESULTS:
                     # Graceful stop - don't retry
@@ -347,6 +363,7 @@ def scrape_task(task: dict):
 
 def main():
     """Main orchestrator - generates tasks and runs them in parallel"""
+    global redis_clients
 
     print(f"\n{'='*60}\n {SITE_NAME.upper()} SCRAPER - TASK-BASED WORKFLOW\n{'='*60}")
     print(f" Workers: {MAX_WORKERS} | Locations: {len(LOCATIONS)} | Transactions: {len(TRANSACTION_TYPES)} | Types: {len(PROPERTY_TYPES)}")
@@ -354,6 +371,22 @@ def main():
     print(f"{'='*60}\n")
 
     start_time = time.time()
+
+    # ========================================================================
+    # SETUP: Connect to Redis
+    # ========================================================================
+
+    try:
+        redis_clients = create_redis_clients(
+            site_name=SITE_NAME,
+            host="5.161.248.214",
+            port=6379,
+            password="redispass"
+        )
+        logger.info("✅ Redis clients connected")
+    except Exception as e:
+        logger.error(f"❌ Redis connection failed: {e}")
+        sys.exit(1)
 
     # ========================================================================
     # GENERATE TASKS
@@ -402,6 +435,18 @@ def main():
         shutdown_event.set()
 
     # ========================================================================
+    # CLEANUP: Close Redis connections
+    # ========================================================================
+
+    try:
+        if redis_clients:
+            for name, client in redis_clients.items():
+                client.close()
+            logger.info("✅ All Redis connections closed")
+    except Exception as e:
+        logger.warning(f"Error closing Redis connections: {e}")
+
+    # ========================================================================
     # SUMMARY
     # ========================================================================
 
@@ -411,7 +456,8 @@ def main():
     print(f" Time: {elapsed:.1f}s ({elapsed/60:.1f} min)")
     print(f" Tasks: {completed}/{len(tasks)} completed")
     print(f" Pages: {total_stats['pages']:,} | URLs: {total_stats['urls']:,}")
-    print(f" Errors: {total_stats['errors']}")
+    print(f" New: {total_stats['new']:,} | Price Changes: {total_stats['price_changes']:,}")
+    print(f" Duplicates: {total_stats['duplicates']:,} | Errors: {total_stats['errors']}")
     print(f"{'='*60}\n")
 
 # ============================================================================

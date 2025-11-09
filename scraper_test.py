@@ -6,6 +6,7 @@ Testing each component before building the next
 """
 import time
 import re
+import json
 import logging
 import os
 from bs4 import BeautifulSoup
@@ -68,12 +69,32 @@ class OlxScraper:
     # INITIALIZATION
     # ========================================================================
 
-    def __init__(self):
-        """Initialize scraper instance."""
+    def __init__(self, redis_clients: dict = None):
+        """
+        Initialize scraper instance.
+
+        Args:
+            redis_clients: Optional dict with 'scrape_session', 'processed_urls', 'url_stream', 'airtable_tasks' clients
+        """
         self.sb = None
         self.debug_dir = "debug_screenshots"
         os.makedirs(self.debug_dir, exist_ok=True)
-        logger.debug("OlxScraper instance created")
+
+        # Redis integration (optional)
+        if redis_clients:
+            self.scrape_session = redis_clients['scrape_session']
+            self.processed_urls = redis_clients['processed_urls']
+            self.url_stream = redis_clients['url_stream']
+            self.airtable_tasks = redis_clients['airtable_tasks']
+            self.site_name = redis_clients['scrape_session'].site_name
+            logger.debug("OlxScraper instance created with Redis clients")
+        else:
+            self.scrape_session = None
+            self.processed_urls = None
+            self.url_stream = None
+            self.airtable_tasks = None
+            self.site_name = self.SITE_NAME
+            logger.debug("OlxScraper instance created without Redis")
 
     # ========================================================================
     # METHODS - To be implemented incrementally
@@ -766,6 +787,109 @@ class OlxScraper:
             base_url += f"?o={page_num}"
 
         return base_url
+
+    def store_urls_batch(self, url_price_pairs: list, metadata: dict) -> dict:
+        """
+        Store URLs with prices in Redis using optimized batch operations.
+
+        Args:
+            url_price_pairs: List of tuples [(url, price), ...]
+            metadata: Dict with 'location', 'prop_type', 'transaction_type'
+
+        Returns:
+            Dict with stats: {'new': int, 'price_changes': int, 'duplicates': int}
+        """
+        if not url_price_pairs:
+            return {'new': 0, 'price_changes': 0, 'duplicates': 0}
+
+        # If Redis not configured, just return counts
+        if not self.scrape_session:
+            logger.debug(f"Redis not configured, skipping storage of {len(url_price_pairs)} URLs")
+            return {'new': len(url_price_pairs), 'price_changes': 0, 'duplicates': 0}
+
+        # Convert None prices to 0 (Redis doesn't accept None values)
+        normalized_pairs = []
+        none_count = 0
+        for url, price in url_price_pairs:
+            if price is None:
+                normalized_pairs.append((url, 0))
+                none_count += 1
+            else:
+                normalized_pairs.append((url, price))
+
+        if none_count > 0:
+            logger.debug(f"⚠️ {none_count} URLs had no price, storing as 0")
+
+        stats = {'new': 0, 'price_changes': 0, 'duplicates': 0}
+        urls_to_publish = []
+        processed_updates = {}
+
+        # ✅ BATCH 1: Add to scrape_session with HSETNX (deduplication at source)
+        url_price_dict = {url: price for url, price in normalized_pairs}
+        hsetnx_results = self.scrape_session.add_urls_if_new_batch(url_price_dict)
+
+        # ✅ BATCH 2: Get existing data only for non-duplicate URLs
+        urls_to_check = [url for url, _ in normalized_pairs if hsetnx_results[url]]
+        existing_data = self.processed_urls.get_urls_batch(urls_to_check) if urls_to_check else {}
+
+        # Process in batch
+        for url, current_price in normalized_pairs:
+            # Check if URL was newly added to scrape_session
+            is_new_in_session = hsetnx_results[url]
+
+            if not is_new_in_session:
+                # URL already in scrape_session from previous page in this run
+                stats['duplicates'] += 1
+                continue  # Skip entirely - don't check processed_urls, don't publish to stream
+
+            # URL is new in scrape_session, check processed_urls for historical data
+            historical_data = existing_data.get(url)
+
+            if historical_data:
+                # URL exists in processed_urls (worker already scraped it)
+                historical_price = historical_data.get('price')
+
+                if historical_price == current_price:
+                    # DUPLICATE: same price, no changes needed
+                    stats['duplicates'] += 1
+                    continue  # Skip: no stream publish, no processed_urls update
+                else:
+                    # PRICE CHANGE: update price in processed_urls only
+                    stats['price_changes'] += 1
+
+                    # Update only the price, preserve all other worker data
+                    processed_updates[url] = {
+                        **historical_data,  # Keep all existing worker data
+                        'price': current_price  # Update only price
+                    }
+            else:
+                # NEW URL: publish to stream for worker to add to processed_urls
+                stats['new'] += 1
+                urls_to_publish.append((url, 'new'))
+
+        # ✅ BATCH 3: Publish to stream using pipeline (single round-trip)
+        if urls_to_publish:
+            self.url_stream.publish_urls_batch(urls_to_publish)
+
+        # ✅ BATCH 4: Update processed_urls ONLY for price changes (not new URLs)
+        if processed_updates:
+            serialized_updates = {url: json.dumps(data) for url, data in processed_updates.items()}
+            self.processed_urls.client.hset(
+                self.processed_urls.processed_key,
+                mapping=serialized_updates
+            )
+
+        # ✅ BATCH 5: Queue Airtable tasks for price changes
+        if processed_updates:
+            for url, data in processed_updates.items():
+                self.airtable_tasks.publish_task(
+                    site=self.site_name,
+                    action='update',
+                    url=url,
+                    fields={'price': data['price']}
+                )
+
+        return stats
 
 
 # ============================================================================
