@@ -154,160 +154,192 @@ def generate_tasks() -> list:
 
 def scrape_task(task: dict):
     """
-    Scrape all pages for a single task (location + prop_type + transaction_type).
+    Scrape all pages for a single task following scraper_test.py workflow.
 
-    Each worker handles the complete task:
-    1. Navigate to page 1
-    2. Detect total pages (max 100 for OLX)
-    3. Scrape pages 1 through total_pages
+    Workflow:
+    - Handles different page states (SUCCESS, NO_RESULTS, CAPTCHA, TIMEOUT, UNKNOWN)
+    - Retry strategy: on error restart browser, navigate to failed page, continue
+    - Up to 3 total attempts per error
+    - No retry on graceful stops (NO_RESULTS, pagination limit)
 
     Args:
         task: Dict with 'location', 'prop_type', 'transaction_type', 'task_key'
     """
     key = task['task_key']
-    scraper = None
+    MAX_RETRIES = 3
+    MAX_PAGES = 100  # OLX limit
 
-    try:
-        # Create scraper
-        scraper = OlxScraper()
-        scraper.init_browser()
+    # Persistent state across retries
+    pagination_limit = MAX_PAGES
+    start_page = 1  # Which page to start from (updated on retry)
 
-        logger.info(f"[{key}] Starting task...")
+    for attempt in range(MAX_RETRIES):
+        scraper = None
 
-        # Navigate to page 1 with retries
-        page_1_url = scraper.get_page_url(task, 1)
-        nav_success = False
-        for attempt in range(MAX_NAV_RETRIES):
-            state = scraper.goto_url(page_1_url)
+        try:
+            if attempt > 0:
+                logger.info(f"[{key}] 🔄 RETRY ATTEMPT {attempt + 1}/{MAX_RETRIES} from page {start_page}")
+                time.sleep(2)  # Brief delay before retry
 
-            if state == PageState.SUCCESS:
-                nav_success = True
-                break
-            elif state == PageState.NO_RESULTS:
-                logger.warning(f"[{key}] No results found")
+            # Initialize scraper
+            scraper = OlxScraper()
+            scraper.init_browser()
+            logger.debug(f"[{key}] Browser initialized")
+
+            # Construct URL for starting page
+            start_url = scraper.get_page_url(task, start_page)
+
+            # Navigate and get page state
+            state = scraper.goto_url(start_url)
+            logger.debug(f"[{key}] Page state: {state}")
+
+            # Handle initial navigation result
+            if state == PageState.NO_RESULTS:
+                # Graceful stop - don't retry
+                logger.info(f"[{key}] No results found")
                 return
 
-            logger.warning(f"[{key}] Navigation attempt {attempt+1}/{MAX_NAV_RETRIES} failed: {state}")
+            elif state in [PageState.CAPTCHA, PageState.TIMEOUT, PageState.UNKNOWN]:
+                # Error - will retry
+                logger.error(f"[{key}] Initial navigation failed: {state}")
+                scraper.save_debug_snapshot(f"{key}_initial_{state}_attempt{attempt + 1}")
+                continue  # Next retry attempt
 
-            if attempt < MAX_NAV_RETRIES - 1:
-                logger.info(f"[{key}] Restarting browser and retrying...")
-                scraper.restart_browser()
+            elif state != PageState.SUCCESS:
+                # Unexpected state
+                logger.error(f"[{key}] Unexpected initial state: {state}")
+                continue  # Next retry attempt
 
-        if not nav_success:
-            logger.error(f"[{key}] Failed to navigate to page 1 after {MAX_NAV_RETRIES} attempts, skipping task")
-            with stats_lock:
-                total_stats['errors'] += 1
-            return
+            # SUCCESS - proceed with scraping
+            logger.info(f"[{key}] Starting scrape from page {start_page}")
 
-        # Detect total pages (max 100 for OLX)
-        total_pages = scraper.get_total_pages()
+            # Extract data from starting page
+            page_num = scraper.get_page_number()
+            page_data = scraper.get_page_data()
 
-        if total_pages == 0:
-            logger.warning(f"[{key}] No pages detected, skipping task")
-            with stats_lock:
-                total_stats['errors'] += 1
-            return
-
-        logger.info(f"[{key}] Detected {total_pages} pages, starting scrape")
-
-        # Loop through all pages (starting from page 1, already loaded)
-        for page in range(1, total_pages + 1):
-            if shutdown_event.is_set():
-                logger.info(f"[{key}] Shutdown requested at page {page}")
-                break
-
-            # Extract URLs from current page with retry logic
-            urls = []
-            for attempt in range(MAX_RETRIES):
-                try:
-                    urls = scraper.get_page_data()
-                    if urls:
-                        break
-                except Exception as e:
-                    logger.error(f"[{key}] Page {page} extraction error (attempt {attempt+1}): {e}")
-
-                if attempt < MAX_RETRIES - 1:
-                    logger.debug(f"[{key}] Restarting browser and retrying page {page}")
-                    scraper.restart_browser()
-                    scraper.goto_url(scraper.get_page_url(task, page))
-
-            # Check for "no results" page - stop scraping if detected
-            if scraper.check_no_results_page():
-                logger.warning(f"[{key}] Page {page}/{total_pages}: 'No results' message detected - stopping early")
-                break
-
-            # Log URLs found
-            if urls:
+            if page_data:
                 with stats_lock:
-                    total_stats['urls'] += len(urls)
+                    total_stats['urls'] += len(page_data)
                     total_stats['pages'] += 1
+                logger.info(f"[{key}] Page {page_num}: {len(page_data)} URLs")
 
-                # Log sample URLs (first 3)
-                sample_urls = [url for url, price in urls[:3]]
-                logger.info(f"[{key}] Page {page}/{total_pages}: {len(urls)} URLs")
-                for url in sample_urls:
-                    logger.debug(f"  - {url}")
-            else:
-                with stats_lock:
-                    total_stats['errors'] += 1
-                logger.warning(f"[{key}] Page {page}/{total_pages}: No URLs extracted after {MAX_RETRIES} attempts")
+            # Detect total pages (only on first attempt from page 1)
+            if attempt == 0 and start_page == 1:
+                total_pages = scraper.get_total_pages()
+                pagination_limit = min(total_pages, MAX_PAGES) if total_pages > 0 else MAX_PAGES
+                logger.info(f"[{key}] Detected {pagination_limit} pages")
 
-            # Navigate to next page (if not last page)
-            if page < total_pages:
-                expected_next_page = page + 1
+            current_page = start_page
 
-                time.sleep(1)  # Polite delay
+            # Track if we should retry (error occurred)
+            should_retry = False
 
-                state = scraper.goto_next_page()
-
-                if state == PageState.SUCCESS:
-                    # Verify we're on expected page
-                    actual_page = scraper.get_page_number()
-                    if actual_page != expected_next_page:
-                        logger.warning(f"[{key}] Page mismatch: expected {expected_next_page}, got {actual_page}")
-                        # Try direct navigation
-                        scraper.goto_url(scraper.get_page_url(task, expected_next_page))
-                elif state == PageState.NO_RESULTS:
-                    logger.info(f"[{key}] Reached end at page {page}")
+            # Pagination loop
+            while current_page < pagination_limit:
+                if shutdown_event.is_set():
+                    logger.info(f"[{key}] Shutdown requested at page {current_page}")
                     break
-                else:
-                    logger.warning(f"[{key}] Navigation failed, using direct URL for page {expected_next_page}")
-                    next_page_url = scraper.get_page_url(task, expected_next_page)
 
-                    # Try navigation with retries
-                    nav_success = False
-                    for attempt in range(MAX_NAV_RETRIES):
-                        state = scraper.goto_url(next_page_url)
-                        if state == PageState.SUCCESS:
-                            nav_success = True
+                logger.debug(f"[{key}] Navigating to next page from {current_page}...")
+
+                # Navigate to next page
+                next_state = scraper.goto_next_page()
+
+                if next_state == PageState.SUCCESS:
+                    # Extract actual page number from URL
+                    page_num = scraper.get_page_number()
+                    expected_page = current_page + 1
+
+                    # Verify we landed on the expected page
+                    if page_num != expected_page:
+                        logger.warning(f"[{key}] Page mismatch! Expected {expected_page}, got {page_num}")
+                        logger.info(f"[{key}] Attempting to navigate directly to page {expected_page}...")
+
+                        # Construct URL for expected page
+                        target_url = scraper.get_page_url(task, expected_page)
+
+                        # Try to navigate directly to the correct page
+                        recovery_state = scraper.goto_url(target_url)
+
+                        if recovery_state != PageState.SUCCESS:
+                            logger.error(f"[{key}] Failed to recover: could not navigate to page {expected_page}")
+                            scraper.save_debug_snapshot(f"{key}_recovery_failed_page{expected_page}_attempt{attempt + 1}")
+                            # Set retry from this page
+                            start_page = expected_page
+                            should_retry = True
                             break
 
-                        logger.warning(f"[{key}] Navigation attempt {attempt+1}/{MAX_NAV_RETRIES} failed for page {expected_next_page}")
+                        logger.info(f"[{key}] ✓ Recovered: successfully navigated to page {expected_page}")
+                        page_num = expected_page  # Update to expected page
 
-                        if attempt < MAX_NAV_RETRIES - 1:
-                            logger.info(f"[{key}] Restarting browser and retrying...")
-                            scraper.restart_browser()
+                    # Update current page and extract data
+                    current_page = page_num
+                    page_data = scraper.get_page_data()
 
-                    if not nav_success:
-                        logger.error(f"[{key}] Failed to navigate to page {expected_next_page} after {MAX_NAV_RETRIES} attempts, stopping task")
+                    if page_data:
                         with stats_lock:
-                            total_stats['errors'] += 1
-                        break
+                            total_stats['urls'] += len(page_data)
+                            total_stats['pages'] += 1
+                        logger.info(f"[{key}] Page {page_num}: {len(page_data)} URLs")
 
-                time.sleep(1)
+                elif next_state == PageState.NO_RESULTS:
+                    # Graceful stop - don't retry
+                    logger.info(f"[{key}] Reached end of listings at page {current_page}")
+                    break
 
-        logger.info(f"[{key}] Complete - scraped {page}/{total_pages} pages")
+                elif next_state in [PageState.TIMEOUT, PageState.UNKNOWN]:
+                    # Error - will retry from this page
+                    logger.warning(f"[{key}] Navigation failed on page {current_page}: {next_state}")
+                    scraper.save_debug_snapshot(f"{key}_pagination_{next_state}_page{current_page}_attempt{attempt + 1}")
+                    start_page = current_page + 1  # Retry from next page
+                    should_retry = True
+                    break
 
-    except Exception as e:
-        logger.error(f"[{key}] Failed: {e}")
-        with stats_lock:
-            total_stats['errors'] += 1
-    finally:
-        if scraper:
-            try:
-                scraper.close_browser()
-            except:
-                pass
+                elif next_state == PageState.CAPTCHA:
+                    # Error - will retry from this page
+                    logger.error(f"[{key}] Captcha on page {current_page}")
+                    scraper.save_debug_snapshot(f"{key}_captcha_page{current_page}_attempt{attempt + 1}")
+                    start_page = current_page + 1  # Retry from next page
+                    should_retry = True
+                    break
+
+            # Check if we should retry or if pagination completed
+            if should_retry:
+                logger.warning(f"[{key}] Error occurred, will retry from page {start_page}")
+                continue  # Next retry attempt
+
+            # Pagination completed successfully
+            logger.info(f"[{key}] ✅ Complete: scraped {current_page} of {pagination_limit} pages")
+            return  # Success - exit retry loop
+
+        except Exception as e:
+            # Exception during workflow - will retry
+            logger.error(f"[{key}] Exception: {str(e)[:200]}")
+            if scraper:
+                scraper.save_debug_snapshot(f"{key}_exception_attempt{attempt + 1}")
+
+            # Set retry from current page if known
+            if 'current_page' in locals():
+                start_page = current_page
+            logger.warning(f"[{key}] Will retry from page {start_page}")
+
+            with stats_lock:
+                total_stats['errors'] += 1
+            continue  # Next retry attempt
+
+        finally:
+            # Always close browser after each attempt
+            if scraper:
+                try:
+                    scraper.close_browser()
+                    logger.debug(f"[{key}] Browser closed")
+                except:
+                    pass
+
+    # All retries exhausted
+    logger.error(f"[{key}] ❌ TASK FAILED after {MAX_RETRIES} attempts (last page: {start_page})")
+    with stats_lock:
+        total_stats['errors'] += 1
 
 # ============================================================================
 # MAIN ORCHESTRATOR
