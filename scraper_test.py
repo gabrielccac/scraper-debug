@@ -383,6 +383,31 @@ class OlxScraper:
         logger.warning("Unknown page state (no captcha, no 'no results', no resources)")
         return PageState.UNKNOWN
 
+    def _wait_for_url_change(self, original_url: str, timeout: int = 2) -> bool:
+        """
+        Actively wait for URL to change from original URL.
+
+        Args:
+            original_url: The URL before transition
+            timeout: Maximum time to wait (default 2s)
+
+        Returns:
+            True if URL changed within timeout
+        """
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                current_url = self.sb.get_current_url()
+                if current_url != original_url:
+                    logger.debug(f"URL changed in {time.time() - start_time:.2f}s")
+                    return True
+            except:
+                pass
+            time.sleep(0.1)  # Poll every 100ms
+
+        logger.debug(f"URL didn't change within {timeout}s")
+        return False
+
     def goto_url(self, url: str, max_retries: int = 2) -> str:
         """
         Navigate to URL and determine page state.
@@ -450,17 +475,15 @@ class OlxScraper:
                 logger.debug("Clicking next page button")
                 self.sb.click(self.NEXT_PAGE_BUTTON)
 
-                # Wait briefly for page transition
-                time.sleep(1)
-
-                # Verify URL changed (page transitioned)
-                new_url = self.sb.get_current_url()
-                if new_url == current_url:
-                    logger.warning("URL didn't change after click")
+                # Wait for URL to change (with timeout)
+                if not self._wait_for_url_change(current_url, timeout=2):
+                    logger.warning("URL didn't change after click (2s timeout)")
                     if attempt < max_retries - 1:
                         continue
                     return PageState.UNKNOWN
 
+                # Log new URL
+                new_url = self.sb.get_current_url()
                 logger.debug(f"Page transitioned: {new_url}")
 
                 # Check new page state
@@ -536,10 +559,36 @@ def scrape_task(url: str):
             logger.info("="*60)
             logger.info("✓ SUCCESS - Ready to scrape")
             logger.info("="*60)
-            # TODO: Add scraping logic here
-            # - Extract data
-            # - Navigate to next page
-            # - Loop through pages
+
+            # Test pagination up to 10 pages
+            MAX_TEST_PAGES = 10
+            current_page = 1
+
+            logger.info(f"Starting pagination test (max {MAX_TEST_PAGES} pages)")
+
+            while current_page < MAX_TEST_PAGES:
+                logger.info(f"On page {current_page}, navigating to next page...")
+
+                # Navigate to next page
+                next_state = scraper.goto_next_page()
+
+                if next_state == PageState.SUCCESS:
+                    current_page += 1
+                    logger.info(f"✓ Page {current_page} loaded successfully")
+
+                elif next_state == PageState.NO_RESULTS:
+                    logger.info(f"Reached end of listings at page {current_page}")
+                    break
+
+                elif next_state in [PageState.TIMEOUT, PageState.UNKNOWN]:
+                    logger.warning(f"Navigation failed on page {current_page}: {next_state}")
+                    break
+
+                elif next_state == PageState.CAPTCHA:
+                    logger.error(f"Captcha on page {current_page}")
+                    break
+
+            logger.info(f"Pagination test complete: reached page {current_page}")
 
         elif state == PageState.NO_RESULTS:
             logger.info("="*60)
