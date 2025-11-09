@@ -637,8 +637,66 @@ class OlxScraper:
             logger.error(f"Error extracting page data: {str(e)[:100]}")
             return []
 
-    # TODO: Pagination helpers
-    # - get_total_pages()
+    def get_total_pages(self) -> int:
+        """
+        Detect total number of pages from current page.
+
+        Extracts total results count from OLX's results text and calculates pages.
+        Website blocks beyond 100 pages, so we respect that limit.
+
+        Returns:
+            Total pages (int), or 0 if detection fails
+        """
+        MAX_PAGES = 100  # Website blocks beyond this
+        LISTINGS_PER_PAGE = 50
+
+        logger.info("🔍 Detecting total pages from current page...")
+
+        try:
+            # Get HTML via JS
+            page_html = self.sb.evaluate("return document.documentElement.outerHTML")
+            soup = BeautifulSoup(page_html, 'lxml')
+
+            # Try to find results text element using multiple strategies
+            results_text_element = None
+
+            # Strategy 1: Look for data-testid attribute
+            results_text_element = soup.select_one('span[data-testid="results-count-text"]')
+
+            # Strategy 2: Find span/p containing "resultados" pattern
+            if not results_text_element:
+                results_text_element = soup.find(['span', 'p'], string=re.compile(r'de\s+[\d.]+\s+resultados?'))
+
+            if results_text_element:
+                results_text = results_text_element.get_text()
+                logger.debug(f"Found results text: {results_text}")
+
+                # Extract the total number using regex
+                # Pattern matches: "1 - 50 de 4.086 resultados" -> 4.086
+                match = re.search(r'de\s+([\d\.]+)\s+resultados?', results_text)
+
+                if match:
+                    total_listings_str = match.group(1).replace('.', '').replace(',', '')
+                    total_listings = int(total_listings_str)
+
+                    # Calculate pages (ceiling division)
+                    expected_pages = (total_listings + LISTINGS_PER_PAGE - 1) // LISTINGS_PER_PAGE
+
+                    # Apply max pages limit
+                    total_pages = min(expected_pages, MAX_PAGES)
+
+                    logger.info(f"✅ Detected {total_pages} pages ({total_listings} listings)")
+                    return total_pages
+                else:
+                    logger.warning(f"Could not extract number from results text: {results_text}")
+                    return 0
+            else:
+                logger.warning("Could not find results text element")
+                return 0
+
+        except Exception as e:
+            logger.error(f"Error detecting total pages: {str(e)[:100]}")
+            return 0
 
 
 # ============================================================================
@@ -690,13 +748,18 @@ def scrape_task(url: str):
             page_data = scraper.get_page_data()
             logger.info(f"📄 Page {page_num}: Extracted {len(page_data)} listings")
 
-            # Test pagination up to 50 pages
+            # Detect total pages from the website
+            total_pages = scraper.get_total_pages()
+
+            # Calculate pagination limit: min(detected_pages, max_allowed)
             MAX_TEST_PAGES = 50
+            pagination_limit = min(total_pages, MAX_TEST_PAGES) if total_pages > 0 else MAX_TEST_PAGES
+
             current_page = 1
 
-            logger.info(f"Starting pagination test (max {MAX_TEST_PAGES} pages)")
+            logger.info(f"Starting pagination (limit: {pagination_limit} pages)")
 
-            while current_page < MAX_TEST_PAGES:
+            while current_page < pagination_limit:
                 logger.info(f"On page {current_page}, navigating to next page...")
 
                 # Navigate to next page
@@ -724,7 +787,7 @@ def scrape_task(url: str):
                     scraper.save_debug_snapshot(f"pagination_captcha_page{current_page}")
                     break
 
-            logger.info(f"Pagination test complete: reached page {current_page}")
+            logger.info(f"Pagination complete: scraped {current_page} of {pagination_limit} pages")
 
         elif state == PageState.NO_RESULTS:
             logger.info("="*60)
