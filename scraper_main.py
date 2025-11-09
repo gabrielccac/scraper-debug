@@ -21,6 +21,11 @@ SITE_NAME = "olx"
 MAX_WORKERS = 1
 MAX_PAGES_PER_TASK = 100  # OLX limit
 
+# Redis connection settings
+REDIS_HOST = "5.161.248.214"
+REDIS_PORT = 6379
+REDIS_PASSWORD = "redispass"
+
 # Location configurations
 LOCATIONS = [
     # "",
@@ -85,7 +90,6 @@ for lib in ["seleniumbase", "selenium", "pika", "urllib3"]:
 # ============================================================================
 
 shutdown_event = threading.Event()
-redis_clients = None
 stats_lock = threading.Lock()
 global_stats = {
     'tasks_completed': 0,
@@ -166,6 +170,8 @@ def execute_task(task: dict):
     """
     Wrapper function to execute a single task and update global stats.
 
+    Each worker creates its own Redis clients to avoid lock contention.
+
     Args:
         task: Task dict with location, prop_type, transaction_type, task_id
     """
@@ -173,11 +179,22 @@ def execute_task(task: dict):
         logger.info(f"[{task['task_id']}] Shutdown requested, skipping task")
         return
 
+    worker_redis_clients = None
+
     try:
+        # Create per-worker Redis clients
+        logger.debug(f"[{task['task_id']}] Creating Redis clients for worker")
+        worker_redis_clients = create_redis_clients(
+            site_name=SITE_NAME,
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            password=REDIS_PASSWORD
+        )
+
         # Execute task with new retry workflow
         stats = scrape_task_with_retry(
             task=task,
-            redis_clients=redis_clients,
+            redis_clients=worker_redis_clients,
             max_pages=MAX_PAGES_PER_TASK
         )
 
@@ -203,13 +220,22 @@ def execute_task(task: dict):
         with stats_lock:
             global_stats['tasks_failed'] += 1
 
+    finally:
+        # Always cleanup worker's Redis connections
+        if worker_redis_clients:
+            try:
+                for name, client in worker_redis_clients.items():
+                    client.close()
+                logger.debug(f"[{task['task_id']}] Redis clients closed")
+            except Exception as e:
+                logger.debug(f"[{task['task_id']}] Error closing Redis: {e}")
+
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
 
 def main():
-    """Main execution flow with Redis setup and task distribution"""
-    global redis_clients
+    """Main execution flow with task distribution (per-worker Redis clients)"""
 
     print(f"\n{'='*60}")
     print(f" {SITE_NAME.upper()} SCRAPER - PRODUCTION WORKFLOW")
@@ -219,26 +245,27 @@ def main():
     print(f" Property Types: {len(PROPERTY_TYPES)}")
     print(f" Transaction Types: {len(TRANSACTION_TYPES)}")
     print(f" Max Pages per Task: {MAX_PAGES_PER_TASK}")
+    print(f" Redis: {REDIS_HOST}:{REDIS_PORT}")
     print(f"{'='*60}\n")
 
     start_time = time.time()
 
     # ========================================================================
-    # SETUP: Connect to Redis
+    # SETUP: Test Redis connection
     # ========================================================================
 
     try:
-        logger.info("Connecting to Redis...")
-        redis_clients = create_redis_clients(
+        logger.info("Testing Redis connection...")
+        test_client = create_redis_clients(
             site_name=SITE_NAME,
-            host="5.161.248.214",  # Your Redis host
-            port=6379,
-            password="redispass"   # Your Redis password
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            password=REDIS_PASSWORD
         )
-
-        # Optional: Clear previous scrape session
-        # redis_clients['scrape_session'].clear_session()
-        logger.info("✅ Redis clients connected")
+        # Close test client
+        for client in test_client.values():
+            client.close()
+        logger.info("✅ Redis connection verified")
 
     except Exception as e:
         logger.error(f"❌ Redis connection failed: {e}")
@@ -297,22 +324,24 @@ def main():
     # CLEANUP & STATS
     # ========================================================================
 
-    # Log Redis stream stats
+    # Log Redis stream stats (create temporary client)
     if not shutdown_event.is_set():
         try:
-            pending_count = redis_clients['url_stream'].get_pending_count()
-            processed_count = len(redis_clients['processed_urls'].get_all_urls())
+            temp_clients = create_redis_clients(
+                site_name=SITE_NAME,
+                host=REDIS_HOST,
+                port=REDIS_PORT,
+                password=REDIS_PASSWORD
+            )
+            pending_count = temp_clients['url_stream'].get_pending_count()
+            processed_count = len(temp_clients['processed_urls'].get_all_urls())
             logger.info(f"📊 Stream stats: {pending_count} pending URLs, {processed_count} total processed")
+
+            # Close temp client
+            for client in temp_clients.values():
+                client.close()
         except Exception as e:
             logger.debug(f"Could not get stream stats: {e}")
-
-    # Close Redis connections
-    try:
-        for name, client in redis_clients.items():
-            client.close()
-        logger.info("✅ All Redis connections closed")
-    except Exception as e:
-        logger.debug(f"Error closing Redis: {e}")
 
     elapsed = time.time() - start_time
 
