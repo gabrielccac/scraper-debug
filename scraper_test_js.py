@@ -57,14 +57,32 @@ class OlxScraper:
             logger.error(f"Error closing browser: {e}")
 
     def wait_for_base_load(self, timeout: int = 10) -> bool:
-        """Wait for body element to exist."""
-        try:
-            self.sb.wait_for_element("body", timeout=timeout)
-            logger.info("✓ Body element loaded")
-            return True
-        except Exception as e:
-            logger.error(f"Base load failed: {e}")
-            return False
+        """Wait for body element to exist using JS evaluation."""
+        import time
+        
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                # Check if body exists
+                body_exists = self.sb.evaluate("return document.body !== null")
+                
+                # Check if title is not about:blank
+                title = self.sb.evaluate("return document.title")
+                title_loaded = title and title.lower() != "about:blank"
+                
+                if body_exists and title_loaded:
+                    logger.info("✓ Body element loaded")
+                    return True
+                    
+            except Exception as e:
+                # Continue waiting if evaluation fails
+                logger.debug(f"Evaluation attempt failed: {e}")
+            
+            time.sleep(0.1)  # Small delay between checks
+        
+        logger.error(f"Base load failed: timeout after {timeout}s")
+        return False
 
     def goto_url(self, url: str) -> bool:
         """Navigate to URL and wait for base load."""

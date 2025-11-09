@@ -520,8 +520,8 @@ class OlxScraper:
                 self.sb.click(self.NEXT_PAGE_BUTTON)
 
                 # Wait for URL to change (with timeout)
-                if not self._wait_for_url_change(current_url, timeout=2):
-                    logger.warning("URL didn't change after click (2s timeout)")
+                if not self._wait_for_url_change(current_url, timeout=3):
+                    logger.warning("URL didn't change after click (3s timeout)")
                     if attempt < max_retries - 1:
                         continue
                     return PageState.UNKNOWN
@@ -639,7 +639,6 @@ class OlxScraper:
 
     # TODO: Pagination helpers
     # - get_total_pages()
-    # - get_page_url()
 
 
 # ============================================================================
@@ -691,8 +690,8 @@ def scrape_task(url: str):
             page_data = scraper.get_page_data()
             logger.info(f"📄 Page {page_num}: Extracted {len(page_data)} listings")
 
-            # Test pagination up to 100 pages
-            MAX_TEST_PAGES = 100
+            # Test pagination up to 50 pages
+            MAX_TEST_PAGES = 50
             current_page = 1
 
             logger.info(f"Starting pagination test (max {MAX_TEST_PAGES} pages)")
@@ -847,7 +846,7 @@ if __name__ == "__main__":
     print("="*60)
 
     # Test URL for development
-    TEST_URL = "https://www.olx.com.br/imoveis/venda/casas/estado-df/distrito-federal-e-regiao"
+    TEST_URL = "https://www.olx.com.br/imoveis/venda/casas/estado-df/distrito-federal-e-regiao/brasilia/ra-xvi---lago-sul"
 
     # Run scrape task
     scrape_task(TEST_URL)
