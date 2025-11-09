@@ -72,23 +72,14 @@ class DfimoveisWorker:
         Initialize worker instance.
 
         Args:
-            redis_clients: Optional dict with Redis clients for queue and storage
+            redis_clients: Optional dict with Redis clients (not used yet)
         """
         self.sb = None
         self.debug_dir = "debug_urls"
         os.makedirs(self.debug_dir, exist_ok=True)
 
-        # Redis integration (optional for now)
-        if redis_clients:
-            self.url_stream = redis_clients.get('url_stream')
-            self.processed_urls = redis_clients.get('processed_urls')
-            self.airtable_tasks = redis_clients.get('airtable_tasks')
-            logger.debug("OlxWorker instance created with Redis clients")
-        else:
-            self.url_stream = None
-            self.processed_urls = None
-            self.airtable_tasks = None
-            logger.debug("OlxWorker instance created without Redis")
+        # Redis integration will be added later
+        logger.debug("DfimoveisWorker instance created (mock queue mode)")
 
     # ========================================================================
     # BROWSER MANAGEMENT - TODO
@@ -503,62 +494,15 @@ class DfimoveisWorker:
             return None
 
     # ========================================================================
-    # QUEUE MANAGEMENT
+    # QUEUE MANAGEMENT - Mock Queue (for testing)
     # ========================================================================
-
-    def consume_next_url(self, consumer_name: str = "worker-1") -> tuple:
-        """
-        Consume next URL from Redis queue.
-
-        Args:
-            consumer_name: Name of this worker consumer
-
-        Returns:
-            Tuple of (message_id, url) or (None, None) if queue is empty
-        """
-        try:
-            if not self.url_stream:
-                logger.warning("No URL stream client configured")
-                return None, None
-
-            # Try to consume one URL (block for 5 seconds)
-            messages = self.url_stream.consume_urls(
-                consumer_name=consumer_name,
-                count=1,
-                block_ms=5000
-            )
-
-            if messages:
-                message_id, url, fields = messages[0]
-                logger.debug(f"📥 Consumed URL from queue: {url[:80]}")
-                return message_id, url
-            else:
-                # No messages available
-                return None, None
-
-        except Exception as e:
-            logger.error(f"Error consuming from queue: {str(e)[:100]}")
-            return None, None
-
-    def ack_url(self, message_id: str):
-        """
-        Acknowledge URL processing completion.
-
-        Args:
-            message_id: Message ID from Redis stream
-        """
-        try:
-            if self.url_stream and message_id:
-                self.url_stream.ack_message(message_id)
-                logger.debug(f"✓ ACK message: {message_id}")
-        except Exception as e:
-            logger.error(f"Error acknowledging message: {str(e)[:100]}")
+    # Note: Redis integration will be added later
 
     # ========================================================================
     # WORKFLOW - TODO
     # ========================================================================
 
-    def process_url(self, url: str, message_id: str = None) -> bool:
+    def process_url(self, url: str) -> bool:
         """
         Process a single property URL.
 
@@ -567,11 +511,9 @@ class DfimoveisWorker:
         2. Check page state
         3. If SUCCESS: parse property details
         4. Store in database (log for now)
-        5. Ack message
 
         Args:
             url: Property URL to process
-            message_id: Redis stream message ID for acknowledgment
 
         Returns:
             True if processed successfully (including offline listings)
@@ -590,53 +532,39 @@ class DfimoveisWorker:
                     # TODO: Store in database (for now, just log)
                     logger.info(f"✅ [SUCCESS] Parsed property: {property_data.get('title', 'Unknown')}")
                     logger.debug(f"   Data: {json.dumps(property_data, indent=2)}")
-
-                    # Acknowledge message
-                    if message_id:
-                        self.ack_url(message_id)
-
                     return True
                 else:
                     logger.error(f"❌ [PARSE_FAILED] Could not parse property")
-                    # Still ack to avoid reprocessing
-                    if message_id:
-                        self.ack_url(message_id)
                     return False
 
             elif state == PageState.OFFLINE:
                 # Listing expired/removed - this is a valid state
                 logger.warning(f"⚠️  [OFFLINE] Listing removed: {url[:80]}")
                 # TODO: Mark as offline in DB
-                # Acknowledge message (don't reprocess offline listings)
-                if message_id:
-                    self.ack_url(message_id)
                 return True  # Treat as success since we handled it
 
             elif state == PageState.CAPTCHA:
                 # Captcha couldn't be solved - need browser restart
                 logger.error(f"❌ [CAPTCHA] Could not solve captcha: {url[:80]}")
-                # Don't ack - let it retry after browser restart
                 return False
 
             else:
                 # TIMEOUT or UNKNOWN
                 logger.error(f"❌ [{state}] Navigation failed: {url[:80]}")
-                # Don't ack - let it retry
                 return False
 
         except Exception as e:
             logger.error(f"❌ [EXCEPTION] Error processing URL: {str(e)[:200]}")
-            # Don't ack - let it retry
             return False
 
 
 # ============================================================================
-# WORKER MAIN LOOP - Persistent Worker Pattern
+# WORKER MAIN LOOP - Persistent Worker Pattern (Mock Queue)
 # ============================================================================
 
-def worker_main(redis_clients: dict = None, consumer_name: str = "worker-1"):
+def worker_main(url_queue: list = None):
     """
-    Main persistent worker loop.
+    Main persistent worker loop with mock queue.
 
     Pattern:
     1. Initialize browser once (persistent)
@@ -646,61 +574,52 @@ def worker_main(redis_clients: dict = None, consumer_name: str = "worker-1"):
        - Queue is empty (finish gracefully)
 
     Args:
-        redis_clients: Dict with Redis clients for queue and storage
-        consumer_name: Unique name for this worker consumer
+        url_queue: List of URLs to process (mock queue for testing)
     """
     logger.info("="*60)
     logger.info("PERSISTENT WORKER STARTED")
-    logger.info(f"Consumer: {consumer_name}")
     logger.info("="*60)
+
+    # Default test URLs if none provided
+    if url_queue is None:
+        url_queue = [
+            "https://www.dfimoveis.com.br/venda/df/brasilia/apartamento/test-1",
+            "https://www.dfimoveis.com.br/venda/df/brasilia/apartamento/test-2",
+            "https://www.dfimoveis.com.br/venda/df/brasilia/apartamento/test-3",
+        ]
+
+    logger.info(f"📋 Queue size: {len(url_queue)} URLs")
 
     worker = None
     consecutive_errors = 0
     max_consecutive_errors = 3
-    empty_queue_checks = 0
-    max_empty_checks = 3  # Exit after 3 consecutive empty queue checks
 
     try:
-        # Initialize worker
-        worker = DfimoveisWorker(redis_clients=redis_clients)
+        # Initialize worker (no Redis clients for now)
+        worker = DfimoveisWorker(redis_clients=None)
 
         # Initialize browser (persistent)
         worker.init_browser()
         logger.info("✓ Persistent worker initialized")
+        logger.info("")
 
         # Main processing loop - keep consuming until queue is empty
-        while True:
+        while url_queue:
             try:
-                # Consume next URL from queue
-                message_id, url = worker.consume_next_url(consumer_name=consumer_name)
-
-                if not url:
-                    # Queue is empty (or timeout)
-                    empty_queue_checks += 1
-                    logger.info(f"📭 Queue empty ({empty_queue_checks}/{max_empty_checks})")
-
-                    if empty_queue_checks >= max_empty_checks:
-                        logger.info("Queue empty after multiple checks - exiting")
-                        break
-
-                    # Wait a bit before checking again
-                    time.sleep(2)
-                    continue
-
-                # Reset empty queue counter when we get a URL
-                empty_queue_checks = 0
+                # Get next URL from queue (FIFO)
+                url = url_queue.pop(0)
+                logger.info(f"📥 Dequeued ({len(url_queue)} remaining): {url[:80]}")
 
                 # Process URL
-                logger.info(f"🔄 Processing: {url[:80]}")
-                success = worker.process_url(url, message_id=message_id)
+                success = worker.process_url(url)
 
                 if success:
-                    logger.info(f"✓ Completed: {url[:80]}")
+                    logger.info(f"✅ Completed successfully")
                     consecutive_errors = 0  # Reset error counter on success
                 else:
                     # Processing failed - might need browser restart
                     consecutive_errors += 1
-                    logger.warning(f"✗ Failed ({consecutive_errors}/{max_consecutive_errors}): {url[:80]}")
+                    logger.warning(f"❌ Failed ({consecutive_errors}/{max_consecutive_errors})")
 
                     if consecutive_errors >= max_consecutive_errors:
                         # Too many errors - restart browser
@@ -714,6 +633,7 @@ def worker_main(redis_clients: dict = None, consumer_name: str = "worker-1"):
                             break
 
                 # Small delay between URLs
+                logger.info("")
                 time.sleep(1)
 
             except KeyboardInterrupt:
@@ -743,6 +663,7 @@ def worker_main(redis_clients: dict = None, consumer_name: str = "worker-1"):
 
         logger.info("="*60)
         logger.info("PERSISTENT WORKER COMPLETE")
+        logger.info(f"📊 Processed: {len(url_queue) if url_queue else 'All'} URLs remaining in queue")
         logger.info("="*60)
 
     except Exception as e:
@@ -760,36 +681,17 @@ def worker_main(redis_clients: dict = None, consumer_name: str = "worker-1"):
 
 if __name__ == "__main__":
     try:
-        # Check if Redis configuration is provided
-        redis_host = os.getenv("REDIS_HOST")
-        redis_port = int(os.getenv("REDIS_PORT", 6379))
-        redis_password = os.getenv("REDIS_PASSWORD", "")
-        site_name = os.getenv("SITE_NAME", "dfimoveis")
-        consumer_name = os.getenv("CONSUMER_NAME", "worker-1")
+        # You can provide custom URLs via command line or use defaults
+        # Example: python worker.py "url1" "url2" "url3"
 
-        redis_clients = None
+        custom_urls = sys.argv[1:] if len(sys.argv) > 1 else None
 
-        if redis_host:
-            logger.info("Initializing Redis clients...")
-            try:
-                from redis_client import create_redis_clients
-                redis_clients = create_redis_clients(
-                    site_name=site_name,
-                    host=redis_host,
-                    port=redis_port,
-                    password=redis_password
-                )
-                logger.info("✅ Redis clients initialized")
-            except Exception as e:
-                logger.error(f"Failed to initialize Redis clients: {e}")
-                logger.info("Running in standalone mode without queue")
-                redis_clients = None
+        if custom_urls:
+            logger.info(f"Using {len(custom_urls)} URLs from command line")
+            worker_main(url_queue=custom_urls)
         else:
-            logger.info("No Redis configuration - running in standalone mode")
-            logger.warning("⚠️  Worker will exit immediately without a queue")
-
-        # Start worker
-        worker_main(redis_clients=redis_clients, consumer_name=consumer_name)
+            logger.info("Using default test URLs")
+            worker_main()
 
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
