@@ -139,8 +139,63 @@ class OlxScraper:
             logger.error(f"Browser restart failed: {str(e)[:100]}")
             return False
 
-    # TODO: Navigation
-    # - goto_url()
+    # ========================================================================
+    # NAVIGATION
+    # ========================================================================
+
+    def goto_url(self, url: str, timeout: int = 5) -> bool:
+        """
+        Navigate to URL and verify key elements are present.
+
+        Checks for:
+        - Page loaded selector (listing container)
+        - Next page button
+
+        Args:
+            url: URL to navigate to
+            timeout: Time to wait for elements (default 5 seconds)
+
+        Returns:
+            True if both elements found, False otherwise
+        """
+        try:
+            logger.info(f"Navigating to: {url}")
+            self.sb.get(url)
+            logger.debug("Navigation command sent")
+
+            # Check for page loaded selector
+            page_loaded = False
+            try:
+                self.sb.wait_for_element(self.PAGE_LOADED_SELECTOR, timeout=timeout)
+                logger.info("✓ Page loaded selector found")
+                page_loaded = True
+            except Exception as e:
+                logger.error(f"✗ Page loaded selector NOT found: {self.PAGE_LOADED_SELECTOR}")
+                logger.debug(f"Error: {str(e)[:100]}")
+
+            # Check for next page button
+            next_button = False
+            try:
+                self.sb.wait_for_element(self.NEXT_PAGE_BUTTON, timeout=timeout)
+                logger.info("✓ Next page button found")
+                next_button = True
+            except Exception as e:
+                logger.error(f"✗ Next page button NOT found: {self.NEXT_PAGE_BUTTON}")
+                logger.debug(f"Error: {str(e)[:100]}")
+
+            # Return True only if both elements found
+            if page_loaded and next_button:
+                logger.info("✓ All required elements present on page")
+                return True
+            else:
+                logger.warning("⚠️ Some required elements missing")
+                return False
+
+        except Exception as e:
+            logger.error(f"Navigation failed: {str(e)[:100]}")
+            return False
+
+    # TODO: Navigation helpers
     # - check_page_loaded()
 
     # TODO: Captcha handling
@@ -187,8 +242,14 @@ def scrape_task(url: str):
         scraper.init_browser()
         logger.info("✓ Browser initialized")
 
-        # Keep browser open for 5 seconds
-        logger.info("Keeping browser open for 5 seconds...")
+        # Navigate to URL
+        if scraper.goto_url(url):
+            logger.info("✓ Navigation successful - all elements found")
+        else:
+            logger.warning("⚠️ Navigation completed but some elements missing")
+
+        # Keep browser open for 5 seconds to visually inspect
+        logger.info("Keeping browser open for 5 seconds for inspection...")
         time.sleep(5)
 
         logger.info("✓ Task completed successfully")
