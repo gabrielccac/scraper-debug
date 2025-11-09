@@ -1010,7 +1010,7 @@ if __name__ == "__main__":
     print("="*60)
 
     # Test URL for development
-    TEST_URL = "https://www.olx.com.br/imoveis/venda/casas/estado-df/distrito-federal-e-regiao/brasilia/ra-xvi---lago-sul"
+    TEST_URL = "olx.com.br/imoveis/aluguel/estado-df"
 
     # Run scrape task
     scrape_task(TEST_URL)
