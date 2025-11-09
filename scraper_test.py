@@ -248,10 +248,6 @@ def scrape_task(url: str):
         else:
             logger.warning("⚠️ Navigation completed but some elements missing")
 
-        # Keep browser open for 5 seconds to visually inspect
-        logger.info("Keeping browser open for 5 seconds for inspection...")
-        time.sleep(5)
-
         logger.info("✓ Task completed successfully")
 
     except Exception as e:
