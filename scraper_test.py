@@ -7,6 +7,7 @@ Testing each component before building the next
 import time
 import re
 import logging
+import os
 from bs4 import BeautifulSoup
 from seleniumbase import sb_cdp
 
@@ -70,6 +71,8 @@ class OlxScraper:
     def __init__(self):
         """Initialize scraper instance."""
         self.sb = None
+        self.debug_dir = "debug_screenshots"
+        os.makedirs(self.debug_dir, exist_ok=True)
         logger.debug("OlxScraper instance created")
 
     # ========================================================================
@@ -151,6 +154,52 @@ class OlxScraper:
         except Exception as e:
             logger.error(f"Browser restart failed: {str(e)[:100]}")
             return False
+
+    def save_debug_snapshot(self, reason: str) -> str:
+        """
+        Save screenshot and URL for debugging stopped workflows.
+
+        Args:
+            reason: Reason for stopping (e.g., "timeout", "captcha", "unknown")
+
+        Returns:
+            Path to saved screenshot
+        """
+        try:
+            if not self.sb:
+                logger.warning("No browser instance to snapshot")
+                return ""
+
+            # Get current URL
+            try:
+                current_url = self.sb.get_current_url()
+            except:
+                current_url = "unknown"
+
+            # Create filename with timestamp and reason
+            timestamp = int(time.time())
+            safe_url = current_url.replace('https://', '').replace('http://', '').replace('/', '_')[:50]
+            filename = f"{reason}_{timestamp}_{safe_url}.png"
+            filepath = os.path.join(self.debug_dir, filename)
+
+            # Save screenshot
+            self.sb.save_screenshot(filepath)
+
+            # Save URL to text file
+            url_file = filepath.replace('.png', '.txt')
+            with open(url_file, 'w') as f:
+                f.write(f"Reason: {reason}\n")
+                f.write(f"URL: {current_url}\n")
+                f.write(f"Timestamp: {timestamp}\n")
+
+            logger.info(f"📸 Debug snapshot saved: {filename}")
+            logger.info(f"   URL: {current_url}")
+
+            return filepath
+
+        except Exception as e:
+            logger.error(f"Failed to save debug snapshot: {str(e)[:100]}")
+            return ""
 
     # ========================================================================
     # NAVIGATION
@@ -582,10 +631,12 @@ def scrape_task(url: str):
 
                 elif next_state in [PageState.TIMEOUT, PageState.UNKNOWN]:
                     logger.warning(f"Navigation failed on page {current_page}: {next_state}")
+                    scraper.save_debug_snapshot(f"pagination_{next_state}_page{current_page}")
                     break
 
                 elif next_state == PageState.CAPTCHA:
                     logger.error(f"Captcha on page {current_page}")
+                    scraper.save_debug_snapshot(f"pagination_captcha_page{current_page}")
                     break
 
             logger.info(f"Pagination test complete: reached page {current_page}")
@@ -600,6 +651,7 @@ def scrape_task(url: str):
         elif state == PageState.CAPTCHA:
             logger.error("="*60)
             logger.error("✗ CAPTCHA FAILED - Couldn't solve captcha")
+            scraper.save_debug_snapshot("initial_captcha")
             logger.error("Consider:")
             logger.error("  - Restart browser and retry")
             logger.error("  - Add delay before retry")
@@ -610,6 +662,7 @@ def scrape_task(url: str):
         elif state == PageState.TIMEOUT:
             logger.error("="*60)
             logger.error("✗ TIMEOUT - Page failed to load")
+            scraper.save_debug_snapshot("initial_timeout")
             logger.error("Consider:")
             logger.error("  - Restart browser")
             logger.error("  - Check network connection")
@@ -620,6 +673,7 @@ def scrape_task(url: str):
         elif state == PageState.UNKNOWN:
             logger.warning("="*60)
             logger.warning("⚠️  UNKNOWN STATE - Unexpected page content")
+            scraper.save_debug_snapshot("initial_unknown")
             logger.warning("Page loaded but doesn't match expected patterns")
             logger.warning("="*60)
             return
@@ -628,6 +682,8 @@ def scrape_task(url: str):
 
     except Exception as e:
         logger.error(f"✗ Task failed with exception: {e}")
+        if scraper:
+            scraper.save_debug_snapshot("exception")
 
     finally:
         # Always close browser
