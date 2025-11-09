@@ -422,7 +422,7 @@ class OlxScraper:
         logger.error("🚫 All captcha solving methods failed")
         return False
 
-    def get_page_state(self, base_load_timeout: int = 5) -> str:
+    def get_page_state(self, base_load_timeout: int = 10) -> str:
         """
         Determine current page state after navigation.
 
@@ -939,67 +939,6 @@ def scrape_task(url: str):
     logger.error(f"❌ TASK FAILED after {MAX_RETRIES} attempts")
     logger.error(f"Last attempted page: {start_page}")
     logger.error("="*60)
-
-
-# ============================================================================
-# MANUAL TESTS - Run each test as we build methods
-# ============================================================================
-
-def test_browser_init():
-    """Test 1: Browser initialization"""
-    print("\n" + "="*60)
-    print("TEST 1: Browser Initialization")
-    print("="*60)
-
-    scraper = OlxScraper()
-    # TODO: Implement init_browser() first, then uncomment:
-    # scraper.init_browser(headless=False)
-    # print("✓ Browser initialized successfully")
-    # scraper.close_browser()
-    # print("✓ Browser closed successfully")
-
-    print("⏸️  Test pending - implement init_browser() first")
-
-
-def test_navigation():
-    """Test 2: Navigate to OLX page and verify load"""
-    print("\n" + "="*60)
-    print("TEST 2: Navigation & Page Load")
-    print("="*60)
-
-    # TODO: Implement after browser init works
-    print("⏸️  Test pending - implement navigate() and verify_page_loaded()")
-
-
-def test_extract_data():
-    """Test 3: Extract URLs and prices from a page"""
-    print("\n" + "="*60)
-    print("TEST 3: Data Extraction")
-    print("="*60)
-
-    # TODO: Implement after navigation works
-    print("⏸️  Test pending - implement extract_page_data()")
-
-
-def test_pagination():
-    """Test 4: Click next page and verify navigation"""
-    print("\n" + "="*60)
-    print("TEST 4: Pagination")
-    print("="*60)
-
-    # TODO: Implement after data extraction works
-    print("⏸️  Test pending - implement click_next_page()")
-
-
-def test_full_task():
-    """Test 5: Complete mini-task (scrape 3 pages)"""
-    print("\n" + "="*60)
-    print("TEST 5: Full Task (3 pages)")
-    print("="*60)
-
-    # TODO: Implement after all components work
-    print("⏸️  Test pending - implement full workflow")
-
 
 # ============================================================================
 # MAIN - Run tests
