@@ -288,7 +288,7 @@ class OlxScraper:
         Returns:
             True if captcha cleared
         """
-        logger.warning("⚠️  Captcha detected! Trying UC mode auto-solve...")
+        logger.warning("⚠️  Captcha detected! Trying UC mode auto-solve.")
 
         # Method 1: UC mode auto-solve (passive waiting)
         start_time = time.time()
@@ -305,11 +305,11 @@ class OlxScraper:
 
             time.sleep(1)
 
-        logger.warning("UC mode timeout - trying fallback methods...")
+        logger.warning("UC mode timeout - trying fallback methods.")
 
         # Method 2: gui_click_captcha()
         try:
-            logger.info("Trying gui_click_captcha()...")
+            logger.info("Trying gui_click_captcha().")
             self.sb.gui_click_captcha()
             time.sleep(3)
 
@@ -323,7 +323,7 @@ class OlxScraper:
 
         # Method 3: solve_captcha()
         try:
-            logger.info("Trying solve_captcha()...")
+            logger.info("Trying solve_captcha().")
             self.sb.solve_captcha()
             time.sleep(3)
 
