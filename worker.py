@@ -440,9 +440,9 @@ class DfimoveisWorker:
             logger.debug("Navigation command sent")
 
             # Check page state
-            state = self.get_page_state(base_load_timeout=5)
+            state = self.get_page_state(base_load_timeout=10)
 
-            logger.info(f"✓ Navigation complete: {state}")
+            # logger.info(f"✓ Navigation complete: {state}")
             return state
 
         except Exception as e:
@@ -583,9 +583,12 @@ def worker_main(url_queue: list = None):
     # Default test URLs if none provided
     if url_queue is None:
         url_queue = [
-            "https://www.dfimoveis.com.br/venda/df/brasilia/apartamento/test-1",
-            "https://www.dfimoveis.com.br/venda/df/brasilia/apartamento/test-2",
-            "https://www.dfimoveis.com.br/venda/df/brasilia/apartamento/test-3",
+            "https://www.dfimoveis.com.br/imovel/casa-4-quartos-venda-jardim-botanico-brasilia-df-condominio-morada-de-deus-1179418",
+            "https://www.dfimoveis.com.br/imovel/casa-4-quartos-venda-jardim-botanico-brasilia-df-travessa-ipe-roxo-1253567",
+            "https://www.dfimoveis.com.br/imovel/apartamento-2-quartos-venda-asa-sul-brasilia-df-sqs-412-1252084",
+            "https://www.dfimoveis.com.br/imovel/loja-0-quartos-venda-noroeste-brasilia-df-clnw-10-11-lote-c-1214670",
+            "https://www.dfimoveis.com.br/imovel/apartamento-3-quartos-venda-sudoeste-brasilia-df-sqsw-504-1245327",
+            "https://www.dfimoveis.com.br/imovel/lancamento-link-noroeste-334299"
         ]
 
     logger.info(f"📋 Queue size: {len(url_queue)} URLs")
@@ -601,14 +604,12 @@ def worker_main(url_queue: list = None):
         # Initialize browser (persistent)
         worker.init_browser()
         logger.info("✓ Persistent worker initialized")
-        logger.info("")
 
         # Main processing loop - keep consuming until queue is empty
         while url_queue:
             try:
-                # Get next URL from queue (FIFO)
                 url = url_queue.pop(0)
-                logger.info(f"📥 Dequeued ({len(url_queue)} remaining): {url[:80]}")
+                # logger.info(f"📥 Dequeued ({len(url_queue)} remaining): {url[:80]}")
 
                 # Process URL
                 success = worker.process_url(url)
@@ -633,7 +634,6 @@ def worker_main(url_queue: list = None):
                             break
 
                 # Small delay between URLs
-                logger.info("")
                 time.sleep(1)
 
             except KeyboardInterrupt:
