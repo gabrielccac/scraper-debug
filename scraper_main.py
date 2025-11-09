@@ -148,13 +148,14 @@ def redis_writer_worker():
                 batch_stats = _store_urls_to_redis(url_price_pairs, metadata)
 
                 # Update global stats
+                num_urls = len(url_price_pairs)
                 with stats_lock:
-                    global_stats['total_urls'] += len(url_price_pairs)
+                    global_stats['total_urls'] += num_urls
                     global_stats['new_urls'] += batch_stats['new']
                     global_stats['price_changes'] += batch_stats['price_changes']
                     global_stats['duplicates'] += batch_stats['duplicates']
 
-                logger.debug(f"✓ Redis wrote {len(url_price_pairs)} URLs: "
+                logger.info(f"✓ Redis wrote {num_urls} URLs: "
                            f"🆕{batch_stats['new']} 💰{batch_stats['price_changes']} "
                            f"🔄{batch_stats['duplicates']}")
 
@@ -192,8 +193,21 @@ def _store_urls_to_redis(url_price_pairs: list, metadata: dict = None) -> dict:
     if not url_price_pairs:
         return {'new': 0, 'price_changes': 0, 'duplicates': 0}
 
+    # Normalize prices: Convert None to 0 (Redis doesn't accept None values)
+    normalized_pairs = []
+    none_count = 0
+    for url, price in url_price_pairs:
+        if price is None:
+            normalized_pairs.append((url, 0))
+            none_count += 1
+        else:
+            normalized_pairs.append((url, price))
+
+    if none_count > 0:
+        logger.debug(f"⚠️ {none_count} URLs had no price, storing as 0")
+
     # Build dict for batch operations
-    url_price_dict = {url: price for url, price in url_price_pairs}
+    url_price_dict = {url: price for url, price in normalized_pairs}
 
     # Step 1: Check scrape_session (HSETNX batch - only adds if new)
     session_results = redis_clients['scrape_session'].add_urls_if_new_batch(url_price_dict)
@@ -256,7 +270,7 @@ def _store_urls_to_redis(url_price_pairs: list, metadata: dict = None) -> dict:
             )
 
     # Calculate duplicates (URLs already in session)
-    duplicates = len(url_price_pairs) - len(new_in_session)
+    duplicates = len(normalized_pairs) - len(new_in_session)
 
     return {
         'new': len(new_urls),
