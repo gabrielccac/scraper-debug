@@ -366,12 +366,53 @@ class AirtableTasksClient(RedisClient):
         """Get total number of messages in stream."""
         return self.client.xlen(self.stream_key)
 
-# Factory function for scraper
+class FailedUrlsClient(RedisClient):
+    """
+    Manages failed URLs that exceeded retry limit.
+    """
+
+    def __init__(self, site_name: str, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.site_name = site_name
+        self.failed_key = f"failed_urls_{site_name}"
+
+    def add_failed_url(self, url: str, error_msg: str):
+        """Add URL to failed list with error message."""
+        data = {
+            'url': url,
+            'error': error_msg,
+            'timestamp': time.time()
+        }
+        self.client.hset(self.failed_key, url, json.dumps(data))
+        logger.debug(f"Added to failed_urls: {url[:80]}")
+
+    def get_failed_url(self, url: str) -> Optional[Dict]:
+        """Get failed URL data."""
+        data_json = self.client.hget(self.failed_key, url)
+        if data_json:
+            return json.loads(data_json)
+        return None
+
+    def get_all_failed_urls(self) -> List[str]:
+        """Get all failed URLs."""
+        return list(self.client.hkeys(self.failed_key))
+
+    def get_failed_count(self) -> int:
+        """Get count of failed URLs."""
+        return self.client.hlen(self.failed_key)
+
+    def remove_failed_url(self, url: str):
+        """Remove URL from failed list (for retry)."""
+        self.client.hdel(self.failed_key, url)
+        logger.debug(f"Removed from failed_urls: {url[:80]}")
+
+# Factory function for scraper and worker
 def create_redis_clients(site_name: str, host: str, port: int, password: str):
-    """Create Redis clients needed for scraper."""
+    """Create Redis clients needed for scraper and worker."""
     clients = {
         'scrape_session': ScrapeSessionClient(site_name, host, port, password, db=0),
         'processed_urls': ProcessedUrlsClient(site_name, host, port, password, db=0),
+        'failed_urls': FailedUrlsClient(site_name, host, port, password, db=0),
         'url_stream': UrlStreamClient(site_name, host, port, password, db=0),
         'airtable_tasks': AirtableTasksClient(host, port, password, db=0),
     }

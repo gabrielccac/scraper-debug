@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-OLX Worker - Property Detail Consumer
-Processes URLs from queue and extracts property details
+DFImoveis Worker - Property Detail Consumer
+Processes URLs from Redis stream and extracts property details
 """
 import time
 import re
@@ -25,6 +25,23 @@ logger = logging.getLogger(__name__)
 for lib in ["seleniumbase", "selenium", "urllib3"]:
     logging.getLogger(lib).setLevel(logging.WARNING)
 
+# Import parser for data extraction
+try:
+    from parser import parse_property_data
+    logger.debug("Parser module loaded successfully")
+except ImportError:
+    logger.warning("Parser module not found - using mock parser")
+    def parse_property_data(soup, url, html):
+        return {"url": url, "titulo": "Mock Data"}
+
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+# Site configuration
+SITE_NAME = 'dfimoveis'
+MAX_RETRIES = 3
 
 # ============================================================================
 # PAGE STATE CONSTANTS
@@ -72,14 +89,25 @@ class DfimoveisWorker:
         Initialize worker instance.
 
         Args:
-            redis_clients: Optional dict with Redis clients (not used yet)
+            redis_clients: Dict with Redis clients for queue and storage
         """
         self.sb = None
         self.debug_dir = "debug_urls"
         os.makedirs(self.debug_dir, exist_ok=True)
 
-        # Redis integration will be added later
-        logger.debug("DfimoveisWorker instance created (mock queue mode)")
+        # Redis integration
+        if redis_clients:
+            self.url_stream = redis_clients.get('url_stream')
+            self.processed_urls = redis_clients.get('processed_urls')
+            self.failed_urls = redis_clients.get('failed_urls')
+            self.airtable_tasks = redis_clients.get('airtable_tasks')
+            logger.debug("DfimoveisWorker instance created with Redis clients")
+        else:
+            self.url_stream = None
+            self.processed_urls = None
+            self.failed_urls = None
+            self.airtable_tasks = None
+            logger.debug("DfimoveisWorker instance created without Redis (mock mode)")
 
     # ========================================================================
     # BROWSER MANAGEMENT - TODO
@@ -494,133 +522,299 @@ class DfimoveisWorker:
             return None
 
     # ========================================================================
-    # QUEUE MANAGEMENT - Mock Queue (for testing)
+    # QUEUE MANAGEMENT - Redis Stream Integration
     # ========================================================================
-    # Note: Redis integration will be added later
+
+    def consume_next_url(self, consumer_name: str = "worker-1") -> tuple:
+        """
+        Consume next URL from Redis stream.
+
+        Args:
+            consumer_name: Name of this worker consumer
+
+        Returns:
+            Tuple of (message_id, url, retry_count, action) or (None, None, 0, None) if queue is empty
+        """
+        try:
+            if not self.url_stream:
+                logger.warning("No URL stream client configured")
+                return None, None, 0, None
+
+            # Try to consume one URL (block for 5 seconds)
+            messages = self.url_stream.consume_urls(
+                consumer_name=consumer_name,
+                count=1,
+                block_ms=5000
+            )
+
+            if messages:
+                message_id, url, fields = messages[0]
+                action = fields.get('action', 'process')
+                retry_count = int(fields.get('retry_count', 0))
+
+                logger.debug(f"📥 Consumed URL: {url[:80]} (Action: {action}, Retry: {retry_count})")
+                return message_id, url, retry_count, action
+            else:
+                # No messages available
+                return None, None, 0, None
+
+        except Exception as e:
+            logger.error(f"Error consuming from stream: {str(e)[:100]}")
+            return None, None, 0, None
+
+    def ack_url(self, message_id: str):
+        """
+        Acknowledge URL processing completion.
+
+        Args:
+            message_id: Message ID from Redis stream
+        """
+        try:
+            if self.url_stream and message_id:
+                self.url_stream.ack_message(message_id)
+                logger.debug(f"✓ ACK message: {message_id}")
+        except Exception as e:
+            logger.error(f"Error acknowledging message: {str(e)[:100]}")
+
+    def handle_retry_or_fail(self, url: str, error_msg: str, retry_count: int):
+        """
+        Handle a failed URL with retry logic (max 3 retries).
+
+        Args:
+            url: Failed URL
+            error_msg: Error message
+            retry_count: Current retry count
+        """
+        try:
+            if retry_count < MAX_RETRIES:
+                # Retry: re-publish to stream with incremented retry count
+                self.url_stream.client.xadd(
+                    self.url_stream.stream_key,
+                    {
+                        'url': url,
+                        'action': 'retry',
+                        'retry_count': str(retry_count + 1),
+                        'timestamp': str(time.time())
+                    }
+                )
+                logger.info(f"🔄 Retry {retry_count + 1}/{MAX_RETRIES} for {url[:80]}: {error_msg}")
+            else:
+                # Failed permanently: store in failed_urls
+                if self.failed_urls:
+                    self.failed_urls.add_failed_url(url, error_msg)
+                logger.error(f"🚫 Max retries reached for {url[:80]}, stored in failed_urls")
+        except Exception as e:
+            logger.error(f"Error handling retry/fail: {str(e)[:100]}")
 
     # ========================================================================
     # WORKFLOW - TODO
     # ========================================================================
 
-    def process_url(self, url: str) -> bool:
+    def process_url(self, url: str, message_id: str = None, retry_count: int = 0) -> bool:
         """
         Process a single property URL.
 
         Workflow:
         1. Navigate to URL
         2. Check page state
-        3. If SUCCESS: parse property details
-        4. Store in database (log for now)
+        3. If SUCCESS: parse property details and save to Redis
+        4. ACK message on success
+        5. Handle retries on failure
 
         Args:
             url: Property URL to process
+            message_id: Redis stream message ID (for acknowledgment)
+            retry_count: Current retry count
 
         Returns:
             True if processed successfully (including offline listings)
         """
-        logger.info(f"Processing URL: {url[:80]}")
+        logger.info(f"Processing: {url[:80]} (Retry: {retry_count})")
 
         try:
             # Navigate and get state
             state = self.goto_url(url)
 
             if state == PageState.SUCCESS:
-                # Parse property details
-                property_data = self.parse_property()
+                # Get page HTML for parser
+                html = self.sb.get_page_source()
+                soup = BeautifulSoup(html, 'lxml')
 
-                if property_data:
-                    # TODO: Store in database (for now, just log)
-                    logger.info(f"✅ [SUCCESS] Parsed property: {property_data.get('title', 'Unknown')}")
-                    logger.debug(f"   Data: {json.dumps(property_data, indent=2)}")
-                    return True
-                else:
-                    logger.error(f"❌ [PARSE_FAILED] Could not parse property")
+                # Parse property details using parser module
+                property_data = parse_property_data(soup, url, html)
+
+                if not property_data or not property_data.get("titulo"):
+                    error_msg = "No valid data extracted"
+                    logger.warning(f"❌ [PARSE_FAILED] {error_msg}")
+                    self.save_debug_snapshot("no_data")
+
+                    # ACK and retry or fail
+                    if message_id:
+                        self.ack_url(message_id)
+                    self.handle_retry_or_fail(url, error_msg, retry_count)
                     return False
 
+                # Save to Redis processed_urls
+                if self.processed_urls:
+                    try:
+                        self.processed_urls.update_full_data(url, property_data)
+                        logger.debug(f"   Saved to processed_urls")
+                    except Exception as e:
+                        error_msg = f"Redis save failed: {str(e)[:100]}"
+                        logger.error(f"❌ {error_msg}")
+
+                        # ACK and retry or fail
+                        if message_id:
+                            self.ack_url(message_id)
+                        self.handle_retry_or_fail(url, error_msg, retry_count)
+                        return False
+
+                # Queue Airtable sync task
+                if self.airtable_tasks:
+                    try:
+                        self.airtable_tasks.publish_task(
+                            site=SITE_NAME,
+                            action='add',
+                            url=url
+                        )
+                        logger.debug(f"   Queued Airtable sync")
+                    except Exception as e:
+                        logger.warning(f"Failed to queue Airtable task: {str(e)[:100]}")
+
+                # Success!
+                logger.info(f"✅ [SUCCESS] Parsed: {property_data.get('titulo', 'Unknown')[:60]}")
+
+                # ACK message
+                if message_id:
+                    self.ack_url(message_id)
+
+                return True
+
             elif state == PageState.OFFLINE:
-                # Listing expired/removed - this is a valid state
+                # Listing expired/removed - remove from processed_urls
                 logger.warning(f"⚠️  [OFFLINE] Listing removed: {url[:80]}")
-                # TODO: Mark as offline in DB
+
+                if self.processed_urls:
+                    try:
+                        self.processed_urls.remove_url(url)
+                        logger.debug(f"   Removed from processed_urls")
+                    except Exception as e:
+                        logger.debug(f"Error removing URL: {str(e)[:100]}")
+
+                # ACK message (don't reprocess offline listings)
+                if message_id:
+                    self.ack_url(message_id)
+
                 return True  # Treat as success since we handled it
 
             elif state == PageState.CAPTCHA:
-                # Captcha couldn't be solved - need browser restart
-                logger.error(f"❌ [CAPTCHA] Could not solve captcha: {url[:80]}")
-                return False
+                # Captcha couldn't be solved - needs retry
+                error_msg = "Captcha resolution failed"
+                logger.error(f"❌ [CAPTCHA] {error_msg}")
+
+                # ACK and retry or fail
+                if message_id:
+                    self.ack_url(message_id)
+                self.handle_retry_or_fail(url, error_msg, retry_count)
+
+                return False  # Browser restart needed
 
             else:
                 # TIMEOUT or UNKNOWN
-                logger.error(f"❌ [{state}] Navigation failed: {url[:80]}")
+                error_msg = f"Navigation failed: {state}"
+                logger.error(f"❌ [{state}] {error_msg}")
+
+                # ACK and retry or fail
+                if message_id:
+                    self.ack_url(message_id)
+                self.handle_retry_or_fail(url, error_msg, retry_count)
+
                 return False
 
         except Exception as e:
-            logger.error(f"❌ [EXCEPTION] Error processing URL: {str(e)[:200]}")
+            error_msg = f"Exception: {str(e)[:200]}"
+            logger.error(f"❌ [EXCEPTION] {error_msg}")
+
+            # ACK and retry or fail
+            if message_id:
+                self.ack_url(message_id)
+            self.handle_retry_or_fail(url, error_msg, retry_count)
+
             return False
 
 
 # ============================================================================
-# WORKER MAIN LOOP - Persistent Worker Pattern (Mock Queue)
+# WORKER MAIN LOOP - Persistent Worker Pattern with Redis Stream
 # ============================================================================
 
-def worker_main(url_queue: list = None):
+def worker_main(redis_clients: dict, consumer_name: str = "worker-1"):
     """
-    Main persistent worker loop with mock queue.
+    Main persistent worker loop consuming from Redis stream.
 
     Pattern:
     1. Initialize browser once (persistent)
-    2. Consume URLs from queue in loop
+    2. Consume URLs from Redis stream in loop
     3. Keep browser persistent until:
        - Error occurs (restart browser and retry)
        - Queue is empty (finish gracefully)
 
     Args:
-        url_queue: List of URLs to process (mock queue for testing)
+        redis_clients: Dict with Redis clients for queue and storage
+        consumer_name: Unique name for this worker consumer
     """
     logger.info("="*60)
     logger.info("PERSISTENT WORKER STARTED")
+    logger.info(f"Consumer: {consumer_name}")
     logger.info("="*60)
-
-    # Default test URLs if none provided
-    if url_queue is None:
-        url_queue = [
-            "https://www.dfimoveis.com.br/imovel/casa-4-quartos-venda-jardim-botanico-brasilia-df-condominio-morada-de-deus-1179418",
-            "https://www.dfimoveis.com.br/imovel/casa-4-quartos-venda-jardim-botanico-brasilia-df-travessa-ipe-roxo-1253567",
-            "https://www.dfimoveis.com.br/imovel/apartamento-2-quartos-venda-asa-sul-brasilia-df-sqs-412-1252084",
-            "https://www.dfimoveis.com.br/imovel/loja-0-quartos-venda-noroeste-brasilia-df-clnw-10-11-lote-c-1214670",
-            "https://www.dfimoveis.com.br/imovel/apartamento-3-quartos-venda-sudoeste-brasilia-df-sqsw-504-1245327",
-            "https://www.dfimoveis.com.br/imovel/lancamento-link-noroeste-334299"
-        ]
-
-    logger.info(f"📋 Queue size: {len(url_queue)} URLs")
 
     worker = None
     consecutive_errors = 0
     max_consecutive_errors = 3
+    empty_queue_checks = 0
+    max_empty_checks = 3  # Exit after 3 consecutive empty checks
+    urls_processed = 0
 
     try:
-        # Initialize worker (no Redis clients for now)
-        worker = DfimoveisWorker(redis_clients=None)
+        # Initialize worker with Redis clients
+        worker = DfimoveisWorker(redis_clients=redis_clients)
 
         # Initialize browser (persistent)
         worker.init_browser()
         logger.info("✓ Persistent worker initialized")
+        logger.info("")
 
         # Main processing loop - keep consuming until queue is empty
-        while url_queue:
+        while True:
             try:
-                url = url_queue.pop(0)
-                # logger.info(f"📥 Dequeued ({len(url_queue)} remaining): {url[:80]}")
+                # Consume next URL from Redis stream
+                message_id, url, retry_count, action = worker.consume_next_url(consumer_name=consumer_name)
+
+                if not url:
+                    # Queue is empty (or timeout)
+                    empty_queue_checks += 1
+                    logger.info(f"📭 Queue empty ({empty_queue_checks}/{max_empty_checks})")
+
+                    if empty_queue_checks >= max_empty_checks:
+                        logger.info("Queue empty after multiple checks - exiting")
+                        break
+
+                    # Wait a bit before checking again
+                    time.sleep(2)
+                    continue
+
+                # Reset empty queue counter when we get a URL
+                empty_queue_checks = 0
 
                 # Process URL
-                success = worker.process_url(url)
+                success = worker.process_url(url, message_id=message_id, retry_count=retry_count)
 
                 if success:
-                    logger.info(f"✅ Completed successfully")
                     consecutive_errors = 0  # Reset error counter on success
+                    urls_processed += 1
                 else:
                     # Processing failed - might need browser restart
                     consecutive_errors += 1
-                    logger.warning(f"❌ Failed ({consecutive_errors}/{max_consecutive_errors})")
+                    logger.warning(f"Failed ({consecutive_errors}/{max_consecutive_errors})")
 
                     if consecutive_errors >= max_consecutive_errors:
                         # Too many errors - restart browser
@@ -663,7 +857,7 @@ def worker_main(url_queue: list = None):
 
         logger.info("="*60)
         logger.info("PERSISTENT WORKER COMPLETE")
-        logger.info(f"📊 Processed: {len(url_queue) if url_queue else 'All'} URLs remaining in queue")
+        logger.info(f"📊 URLs processed: {urls_processed}")
         logger.info("="*60)
 
     except Exception as e:
@@ -680,19 +874,68 @@ def worker_main(url_queue: list = None):
 # ============================================================================
 
 if __name__ == "__main__":
+    start_time = time.time()
+
     try:
-        # You can provide custom URLs via command line or use defaults
-        # Example: python worker.py "url1" "url2" "url3"
+        # Get configuration from environment variables
+        redis_host = os.getenv("REDIS_HOST")
+        redis_port = int(os.getenv("REDIS_PORT", 6379))
+        redis_password = os.getenv("REDIS_PASSWORD", "")
+        consumer_name = os.getenv("CONSUMER_NAME", f"worker-{os.getpid()}")
 
-        custom_urls = sys.argv[1:] if len(sys.argv) > 1 else None
+        if not redis_host:
+            logger.error("❌ REDIS_HOST environment variable not set")
+            logger.error("Cannot proceed without Redis. Exiting.")
+            sys.exit(1)
 
-        if custom_urls:
-            logger.info(f"Using {len(custom_urls)} URLs from command line")
-            worker_main(url_queue=custom_urls)
-        else:
-            logger.info("Using default test URLs")
-            worker_main()
+        # Initialize Redis clients
+        logger.info("Connecting to Redis...")
+        try:
+            from redis_client import create_redis_clients
 
+            redis_clients = create_redis_clients(
+                site_name=SITE_NAME,
+                host=redis_host,
+                port=redis_port,
+                password=redis_password
+            )
+
+            logger.info("✅ Connected to Redis")
+            logger.info(f"   Stream: {redis_clients['url_stream'].stream_key}")
+            logger.info(f"   Consumer Group: {redis_clients['url_stream'].consumer_group}")
+            logger.info(f"   Processed URLs: {len(redis_clients['processed_urls'].get_all_urls()):,}")
+
+            # Check if failed_urls client exists (might be in different db)
+            if 'failed_urls' in redis_clients:
+                try:
+                    failed_count = redis_clients['failed_urls'].get_failed_count()
+                    logger.info(f"   Failed URLs: {failed_count}")
+                except:
+                    pass
+
+        except Exception as e:
+            logger.error(f"❌ Failed to connect to Redis: {e}")
+            logger.error("Cannot proceed without Redis. Exiting.")
+            sys.exit(1)
+
+        # Start worker
+        worker_main(redis_clients=redis_clients, consumer_name=consumer_name)
+
+        # Calculate elapsed time
+        elapsed = time.time() - start_time
+        logger.info(f"⏱️  Total time: {elapsed:.2f}s ({elapsed/60:.1f} min)")
+
+    except KeyboardInterrupt:
+        logger.info("\n⚠️  Interrupted by user")
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)
+    finally:
+        # Close Redis connections
+        try:
+            if 'redis_clients' in locals():
+                for name, client in redis_clients.items():
+                    client.close()
+                logger.info("✅ Redis connections closed")
+        except Exception as e:
+            logger.debug(f"Error closing Redis: {e}")
