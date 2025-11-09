@@ -302,9 +302,67 @@ class OlxScraper:
             logger.debug(f"Error checking no results: {str(e)[:100]}")
             return False
 
+    def _wait_for_element_js(self, selector: str, timeout: float = 5.0, poll_interval: float = 0.1) -> bool:
+        """
+        Wait for element to appear using JavaScript evaluation with manual timeout.
+
+        This method can detect elements earlier than native Selenium methods
+        as it uses JS to poll the DOM directly without waiting for full page load.
+
+        Args:
+            selector: CSS selector or XPath (detected by leading '//')
+            timeout: Maximum time to wait in seconds (default 5.0)
+            poll_interval: Time between polls in seconds (default 0.1)
+
+        Returns:
+            True if element found within timeout, False otherwise
+        """
+        start_time = time.time()
+        is_xpath = selector.startswith('//')
+
+        if is_xpath:
+            # XPath selector - use document.evaluate
+            js_code = f"""
+            var result = document.evaluate(
+                {repr(selector)},
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null
+            );
+            return result.singleNodeValue !== null;
+            """
+        else:
+            # CSS selector - use querySelector
+            js_code = f"return document.querySelector({repr(selector)}) !== null;"
+
+        try:
+            while time.time() - start_time < timeout:
+                try:
+                    element_exists = self.sb.evaluate(js_code)
+                    if element_exists:
+                        elapsed = time.time() - start_time
+                        logger.debug(f"Element found via JS in {elapsed:.2f}s: {selector}")
+                        return True
+                except Exception as e:
+                    logger.debug(f"JS eval error (continuing): {str(e)[:50]}")
+
+                time.sleep(poll_interval)
+
+            logger.debug(f"Element not found via JS after {timeout}s: {selector}")
+            return False
+
+        except Exception as e:
+            logger.debug(f"Error in _wait_for_element_js: {str(e)[:100]}")
+            return False
+
     def check_page_resources(self) -> bool:
         """
-        Check if all required page resources are present.
+        Check if all required page resources are present using JS evaluation.
+
+        Uses JavaScript evaluation with manual timeout to detect elements earlier
+        than native Selenium methods. This allows identifying elements before
+        full page load is complete.
 
         Verifies all required elements:
         - Listing container
@@ -315,24 +373,27 @@ class OlxScraper:
             True if all resources found, False otherwise
         """
         required_elements = [
-            (self.PAGE_LOADED_SELECTOR, "Listing container"),
-            (self.LISTING_CARD_SELECTOR, "Listing card"),
-            (self.NEXT_PAGE_BUTTON, "Next page button")
+            (self.PAGE_LOADED_SELECTOR, "Listing container", 3.0),
+            (self.LISTING_CARD_SELECTOR, "Listing card", 3.0),
+            (self.NEXT_PAGE_BUTTON, "Next page button", 3.0)
         ]
 
         try:
             missing = []
 
-            for selector, name in required_elements:
-                if not self.sb.is_element_present(selector):
-                    logger.debug(f"{name} not found: {selector}")
+            for selector, name, timeout in required_elements:
+                # Use JS evaluation with manual timeout instead of native SB methods
+                if not self._wait_for_element_js(selector, timeout=timeout):
+                    logger.debug(f"{name} not found via JS: {selector}")
                     missing.append(name)
+                else:
+                    logger.debug(f"✓ {name} found via JS")
 
             if missing:
                 logger.debug(f"Missing elements: {', '.join(missing)}")
                 return False
 
-            logger.debug("✓ All page resources present")
+            logger.debug("✓ All page resources present (via JS)")
             return True
 
         except Exception as e:
