@@ -551,12 +551,94 @@ class OlxScraper:
 
         return PageState.TIMEOUT
 
-    # TODO: Data extraction
-    # - get_page_data()
-    # - get_total_pages()
+    # ========================================================================
+    # DATA EXTRACTION
+    # ========================================================================
+
+    def get_page_number(self) -> int:
+        """
+        Extract page number from URL using JS.
+
+        URL format: ?o=2 means page 2, no ?o= means page 1
+
+        Returns:
+            Current page number (1-based)
+        """
+        try:
+            # Get URL via JS
+            url = self.sb.evaluate("return window.location.href")
+
+            # Extract o={page_num} parameter
+            match = re.search(r'[?&]o=(\d+)', url)
+            page_num = int(match.group(1)) if match else 1
+
+            logger.debug(f"Extracted page number: {page_num}")
+            return page_num
+
+        except Exception as e:
+            logger.error(f"Error extracting page number: {str(e)[:100]}")
+            return 1
+
+    def get_page_data(self) -> list:
+        """
+        Extract listing URLs with prices using JS to get HTML.
+
+        Uses JS evaluation to get page HTML, then BeautifulSoup to parse.
+
+        Returns:
+            List of tuples: [(url, price), ...]
+            Price is int or None if not found
+        """
+        try:
+            # Get HTML via JS
+            logger.debug("Getting page HTML via JS...")
+            page_html = self.sb.evaluate("return document.documentElement.outerHTML")
+
+            # Parse with BeautifulSoup
+            soup = BeautifulSoup(page_html, 'lxml')
+
+            urls_with_prices = []
+            listing_elements = soup.select(self.LISTING_CARD_SELECTOR)
+
+            logger.debug(f"Found {len(listing_elements)} listing cards")
+
+            for listing in listing_elements:
+                # Extract URL
+                link_element = listing.select_one('a[data-testid="adcard-link"]')
+                if not link_element:
+                    continue
+
+                href = link_element.get('href')
+                if not href:
+                    continue
+
+                # Build and clean URL
+                full_url = href if href.startswith('http') else self.BASE_URL.rstrip('/') + href
+                clean_url = full_url.split('?')[0]  # Remove query params
+
+                # Extract price
+                price = None
+                price_h3 = listing.select_one('h3.olx-adcard__price')
+                if price_h3:
+                    price_text = price_h3.get_text(strip=True)
+                    # Remove "R$", dots, spaces
+                    price_clean = price_text.replace('R$', '').replace('.', '').replace(' ', '').strip()
+                    try:
+                        price = int(price_clean)
+                    except (ValueError, AttributeError):
+                        pass  # Keep price as None
+
+                urls_with_prices.append((clean_url, price))
+
+            logger.debug(f"Extracted {len(urls_with_prices)} listings with URLs and prices")
+            return urls_with_prices
+
+        except Exception as e:
+            logger.error(f"Error extracting page data: {str(e)[:100]}")
+            return []
 
     # TODO: Pagination helpers
-    # - get_page_number()
+    # - get_total_pages()
     # - get_page_url()
 
 
@@ -604,7 +686,12 @@ def scrape_task(url: str):
             logger.info("✓ SUCCESS - Ready to scrape")
             logger.info("="*60)
 
-            # Test pagination up to 10 pages
+            # Extract data from initial page (page 1)
+            page_num = scraper.get_page_number()
+            page_data = scraper.get_page_data()
+            logger.info(f"📄 Page {page_num}: Extracted {len(page_data)} listings")
+
+            # Test pagination up to 100 pages
             MAX_TEST_PAGES = 100
             current_page = 1
 
@@ -618,7 +705,11 @@ def scrape_task(url: str):
 
                 if next_state == PageState.SUCCESS:
                     current_page += 1
-                    logger.info(f"✓ Page {current_page} loaded successfully")
+
+                    # Extract data from new page
+                    page_num = scraper.get_page_number()
+                    page_data = scraper.get_page_data()
+                    logger.info(f"📄 Page {page_num}: Extracted {len(page_data)} listings")
 
                 elif next_state == PageState.NO_RESULTS:
                     logger.info(f"Reached end of listings at page {current_page}")
