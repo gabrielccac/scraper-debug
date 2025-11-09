@@ -18,7 +18,7 @@ from redis_client import create_redis_clients
 # ============================================================================
 
 SITE_NAME = "olx"
-MAX_WORKERS = 1
+MAX_WORKERS = 3
 MAX_PAGES_PER_TASK = 100  # OLX limit
 
 # Location configurations
