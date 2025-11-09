@@ -75,7 +75,7 @@ class DfimoveisWorker:
             redis_clients: Optional dict with Redis clients for queue and storage
         """
         self.sb = None
-        self.debug_dir = "debug_screenshots_worker"
+        self.debug_dir = "debug_urls"
         os.makedirs(self.debug_dir, exist_ok=True)
 
         # Redis integration (optional for now)

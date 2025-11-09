@@ -77,7 +77,7 @@ class OlxScraper:
             redis_clients: Optional dict with 'scrape_session', 'processed_urls', 'url_stream', 'airtable_tasks' clients
         """
         self.sb = None
-        self.debug_dir = "debug_screenshots"
+        self.debug_dir = "debug_pages"
         os.makedirs(self.debug_dir, exist_ok=True)
 
         # Redis integration (optional)
