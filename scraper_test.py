@@ -161,6 +161,49 @@ class OlxScraper:
 
 
 # ============================================================================
+# SCRAPE TASK - Main workflow function
+# ============================================================================
+
+def scrape_task(url: str):
+    """
+    Simple scrape task for testing.
+
+    Args:
+        url: URL to test with
+    """
+    logger.info("="*60)
+    logger.info("Starting scrape task")
+    logger.info(f"Test URL: {url}")
+    logger.info("="*60)
+
+    scraper = None
+
+    try:
+        # Initialize scraper
+        scraper = OlxScraper()
+        logger.info("✓ Scraper instance created")
+
+        # Initialize browser
+        scraper.init_browser()
+        logger.info("✓ Browser initialized")
+
+        # Keep browser open for 5 seconds
+        logger.info("Keeping browser open for 5 seconds...")
+        time.sleep(5)
+
+        logger.info("✓ Task completed successfully")
+
+    except Exception as e:
+        logger.error(f"✗ Task failed: {e}")
+
+    finally:
+        # Always close browser
+        if scraper:
+            scraper.close_browser()
+            logger.info("✓ Browser closed")
+
+
+# ============================================================================
 # MANUAL TESTS - Run each test as we build methods
 # ============================================================================
 
@@ -228,12 +271,11 @@ if __name__ == "__main__":
     print("\n🧪 OLX SCRAPER - INCREMENTAL TESTING")
     print("="*60)
 
-    # Run tests one by one as we build
-    test_browser_init()
-    test_navigation()
-    test_extract_data()
-    test_pagination()
-    test_full_task()
+    # Test URL for development
+    TEST_URL = "https://www.olx.com.br/imoveis/venda/casas/estado-df/distrito-federal-e-regiao/brasilia/ra-xvi---lago-sul"
+
+    # Run scrape task
+    scrape_task(TEST_URL)
 
     print("\n" + "="*60)
     print("Testing session complete")
