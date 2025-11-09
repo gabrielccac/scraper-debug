@@ -273,17 +273,17 @@ class OlxScraper:
             logger.debug(f"Error checking page resources: {str(e)[:100]}")
             return False
 
-    def handle_captcha(self, max_wait: int = 60) -> bool:
+    def handle_captcha(self, max_wait: int = 30) -> bool:
         """
         Handle captcha with multiple strategies.
 
         Strategy:
-        1. Wait for UC mode auto-solve (60s)
+        1. Wait for UC mode auto-solve (30s)
         2. Try gui_click_captcha()
         3. Try solve_captcha()
 
         Args:
-            max_wait: Maximum time to wait for UC mode
+            max_wait: Maximum time to wait for UC mode (default 30s)
 
         Returns:
             True if captcha cleared
@@ -338,20 +338,58 @@ class OlxScraper:
         logger.error("🚫 All captcha solving methods failed")
         return False
 
-    def goto_url(self, url: str, max_retries: int = 3) -> str:
+    def get_page_state(self, base_load_timeout: int = 5) -> str:
+        """
+        Determine current page state after navigation.
+
+        Performs ordered checks:
+        1. Base load (body + title)
+        2. Captcha (handle if detected)
+        3. No results page
+        4. Page resources present
+
+        Args:
+            base_load_timeout: Timeout for base load check (default 5s)
+
+        Returns:
+            PageState constant indicating current state
+        """
+        # 1. Wait for basic page load
+        if not self._wait_for_base_load(timeout=base_load_timeout):
+            logger.warning("Base page load timeout")
+            return PageState.TIMEOUT
+
+        # 2. Check captcha (FIRST - blocks everything else)
+        if self.check_captcha_page():
+            logger.warning("Captcha detected")
+            if self.handle_captcha():
+                logger.info("Captcha solved, re-checking page state")
+                # Recursively check page state after solving captcha
+                return self.get_page_state(base_load_timeout)
+            else:
+                return PageState.CAPTCHA
+
+        # 3. Check no results (valid but empty page)
+        if self.check_no_results_page():
+            logger.info("No results page detected")
+            return PageState.NO_RESULTS
+
+        # 4. Check all page resources present (expected success state)
+        if self.check_page_resources():
+            logger.debug("✓ All page resources present")
+            return PageState.SUCCESS
+
+        # Unknown state - page loaded but unexpected content
+        logger.warning("Unknown page state (no captcha, no 'no results', no resources)")
+        return PageState.UNKNOWN
+
+    def goto_url(self, url: str, max_retries: int = 2) -> str:
         """
         Navigate to URL and determine page state.
 
-        Returns page state (does not make decisions):
-        - PageState.SUCCESS: Listings found
-        - PageState.NO_RESULTS: Valid page but no listings
-        - PageState.CAPTCHA: Captcha couldn't be solved
-        - PageState.TIMEOUT: Page failed to load
-        - PageState.UNKNOWN: Unexpected state
-
         Args:
             url: URL to navigate to
-            max_retries: Maximum retry attempts
+            max_retries: Maximum retry attempts (default 2)
 
         Returns:
             PageState constant indicating result
@@ -364,45 +402,83 @@ class OlxScraper:
                 self.sb.get(url)
                 logger.debug(f"Navigation command sent (attempt {attempt + 1}/{max_retries})")
 
-                # 1. Wait for basic page load
-                if not self._wait_for_base_load(timeout=10):
-                    logger.warning("Base page load timeout")
+                # Check page state
+                state = self.get_page_state(base_load_timeout=5)
+
+                # If timeout or unknown, retry
+                if state in [PageState.TIMEOUT, PageState.UNKNOWN]:
                     if attempt < max_retries - 1:
+                        logger.info("Retrying navigation...")
+                        time.sleep(1)
                         continue
-                    return PageState.TIMEOUT
 
-                # 2. Check captcha (FIRST - blocks everything else)
-                if self.check_captcha_page():
-                    logger.warning("Captcha detected")
-                    if self.handle_captcha():
-                        logger.info("Captcha solved, re-checking page state")
-                        # Don't increment attempt, re-check page
-                        continue
-                    else:
-                        return PageState.CAPTCHA
-
-                # 3. Check no results (valid but empty page)
-                if self.check_no_results_page():
-                    logger.info("No results page detected")
-                    return PageState.NO_RESULTS
-
-                # 4. Check all page resources present (expected success state)
-                if self.check_page_resources():
-                    logger.info("✓ All page resources present")
-                    return PageState.SUCCESS
-
-                # Unknown state - page loaded but unexpected content
-                logger.warning("Unknown page state (no listings, no captcha, no 'no results')")
-                if attempt < max_retries - 1:
-                    logger.info("Retrying...")
-                    time.sleep(2)  # Brief delay before retry
-                    continue
-
-                return PageState.UNKNOWN
+                # Return state (SUCCESS, NO_RESULTS, CAPTCHA, TIMEOUT, UNKNOWN)
+                logger.info(f"✓ Navigation complete: {state}")
+                return state
 
             except Exception as e:
                 logger.error(f"Navigation error (attempt {attempt + 1}/{max_retries}): {str(e)[:100]}")
                 if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                return PageState.TIMEOUT
+
+        return PageState.TIMEOUT
+
+    def goto_next_page(self, max_retries: int = 2) -> str:
+        """
+        Click next page button and verify page transition.
+
+        Args:
+            max_retries: Maximum retry attempts (default 2)
+
+        Returns:
+            PageState constant indicating result
+        """
+        logger.debug("Attempting to go to next page")
+
+        for attempt in range(max_retries):
+            try:
+                # Store current URL to verify transition
+                current_url = self.sb.get_current_url()
+
+                # Click next page button
+                if not self.sb.is_element_present(self.NEXT_PAGE_BUTTON):
+                    logger.warning("Next page button not found")
+                    return PageState.UNKNOWN
+
+                logger.debug("Clicking next page button")
+                self.sb.click(self.NEXT_PAGE_BUTTON)
+
+                # Wait briefly for page transition
+                time.sleep(1)
+
+                # Verify URL changed (page transitioned)
+                new_url = self.sb.get_current_url()
+                if new_url == current_url:
+                    logger.warning("URL didn't change after click")
+                    if attempt < max_retries - 1:
+                        continue
+                    return PageState.UNKNOWN
+
+                logger.debug(f"Page transitioned: {new_url}")
+
+                # Check new page state
+                state = self.get_page_state(base_load_timeout=5)
+
+                # If timeout or unknown, retry
+                if state in [PageState.TIMEOUT, PageState.UNKNOWN]:
+                    if attempt < max_retries - 1:
+                        logger.info("Retrying next page click...")
+                        continue
+
+                logger.info(f"✓ Next page navigation complete: {state}")
+                return state
+
+            except Exception as e:
+                logger.error(f"Next page error (attempt {attempt + 1}/{max_retries}): {str(e)[:100]}")
+                if attempt < max_retries - 1:
+                    time.sleep(1)
                     continue
                 return PageState.TIMEOUT
 
@@ -412,8 +488,7 @@ class OlxScraper:
     # - get_page_data()
     # - get_total_pages()
 
-    # TODO: Pagination
-    # - click_next_page()
+    # TODO: Pagination helpers
     # - get_page_number()
     # - get_page_url()
 
