@@ -1,14 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-OLX Scraper - JS-Based Methods with Manual Polling
-Testing performance of direct JS execution vs default methods
+OLX Scraper - Minimal JS Testing
+Understanding JS execution from scratch
 """
 import time
-import re
 import logging
-import os
-from bs4 import BeautifulSoup
 from seleniumbase import sb_cdp
 
 # Setup logging
@@ -24,819 +21,124 @@ for lib in ["seleniumbase", "selenium", "urllib3"]:
     logging.getLogger(lib).setLevel(logging.WARNING)
 
 
-# ============================================================================
-# PAGE STATE CONSTANTS
-# ============================================================================
-
-class PageState:
-    """Page state constants for navigation results"""
-    SUCCESS = "success"           # Listings found, ready to scrape
-    NO_RESULTS = "no_results"     # Valid page but no listings (stop task)
-    CAPTCHA = "captcha"           # Captcha couldn't be solved
-    TIMEOUT = "timeout"           # Page failed to load
-    UNKNOWN = "unknown"           # Loaded but unexpected state
-
-
 class OlxScraper:
-    """
-    Clean implementation of OLX property scraper.
-    Built incrementally with testing at each step.
-    """
+    """Minimal scraper to test JS execution"""
 
-    # ========================================================================
-    # CONSTANTS - Site Configuration
-    # ========================================================================
-
-    BASE_URL = "https://www.olx.com.br/"
-    SITE_NAME = "olx"
-
-    # Selectors
-    PAGE_LOADED_SELECTOR = 'div.AdListing_adListContainer__ALQla'
-    LISTING_CARD_SELECTOR = 'section.olx-adcard'
-    NEXT_PAGE_BUTTON = '//a[text()="Próxima página"]'
-    NO_RESULTS_MESSAGE = 'Ops! Nenhum anúncio foi encontrado.'
-
-    # Captcha detection patterns
-    CAPTCHA_TITLE_KEYWORDS = ["Um momento", "Just a moment"]
-    CAPTCHA_TEXT_KEYWORDS = ["Confirme que você é humano", "cf-challenge"]
-
-    # Settings
-    LOAD_TIMEOUT = 15
     BROWSER_LOCALE = "pt-br"
-
-    # ========================================================================
-    # INITIALIZATION
-    # ========================================================================
 
     def __init__(self):
         """Initialize scraper instance."""
         self.sb = None
-        self.debug_dir = "debug_screenshots"
-        os.makedirs(self.debug_dir, exist_ok=True)
-        logger.debug("OlxScraper instance created")
+        logger.info("Scraper instance created")
 
-    # ========================================================================
-    # METHODS - To be implemented incrementally
-    # ========================================================================
+    def init_browser(self):
+        """Initialize browser."""
+        try:
+            self.sb = sb_cdp.Chrome(
+                uc=True,
+                headless=False,
+                locale=self.BROWSER_LOCALE,
+                window_size="1920,1080",
+                ad_block=True,
+            )
+            logger.info("✓ Browser initialized")
+            return True
+        except Exception as e:
+            logger.error(f"Browser init failed: {e}")
+            raise
 
-    # TODO: Browser management
-    def init_browser(self, max_retries: int = 3):
-        """
-        Initialize SeleniumBase browser instance with retry logic.
-
-        Args:
-            headless: Run in headless mode
-            max_retries: Maximum number of retry attempts (default 3)
-        """
-        for attempt in range(max_retries):
-            try:
-                self.sb = sb_cdp.Chrome(
-                    uc=True,
-                    headless=False,
-                    locale=self.BROWSER_LOCALE,
-                    window_size="1920,1080",
-                    ad_block=True,
-                )
-                logger.debug(f"Browser initialized successfully (attempt {attempt + 1}/{max_retries})")
-                return True
-
-            except Exception as e:
-                logger.warning(f"Browser init attempt {attempt + 1}/{max_retries} failed: {str(e)[:100]}")
-
-                # Cleanup failed browser instance before retry
-                try:
-                    if self.sb:
-                        self.sb.driver.quit()
-                        self.sb = None
-                except:
-                    pass
-
-                if attempt < max_retries - 1:
-                    # Exponential backoff: 1s, 2s, 4s
-                    wait_time = 1.5 ** attempt
-                    logger.info(f"Waiting {wait_time}s before retry...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"Failed to initialize browser after {max_retries} attempts")
-                    raise
-
-        return False
-    
     def close_browser(self):
-        """Safely close browser instance."""
+        """Close browser."""
         try:
             if self.sb:
                 self.sb.driver.stop()
-                logger.debug("Browser closed")
+                logger.info("✓ Browser closed")
         except Exception as e:
-            logger.debug(f"Error closing browser: {str(e)[:100]}")
+            logger.error(f"Error closing browser: {e}")
 
-    def restart_browser(self) -> bool:
-        """
-        Close and reinitialize browser.
-
-        Returns:
-            True if restart successful
-        """
+    def wait_for_base_load(self, timeout: int = 10) -> bool:
+        """Wait for body element to exist."""
         try:
-            logger.info("Restarting browser...")
+            self.sb.wait_for_element("body", timeout=timeout)
+            logger.info("✓ Body element loaded")
+            return True
+        except Exception as e:
+            logger.error(f"Base load failed: {e}")
+            return False
 
-            # Close existing browser
-            self.close_browser()
-            time.sleep(1)
+    def goto_url(self, url: str) -> bool:
+        """Navigate to URL and wait for base load."""
+        try:
+            logger.info(f"Navigating to: {url}")
+            self.sb.get(url)
 
-            # Reinitialize browser
-            self.init_browser()
+            # Wait for base load
+            if not self.wait_for_base_load(timeout=10):
+                return False
 
-            logger.info("Browser restarted successfully")
+            logger.info("✓ Page loaded")
             return True
 
         except Exception as e:
-            logger.error(f"Browser restart failed: {str(e)[:100]}")
+            logger.error(f"Navigation failed: {e}")
             return False
 
-    def save_debug_snapshot(self, reason: str) -> str:
-        """
-        Save screenshot and URL for debugging stopped workflows.
-
-        Args:
-            reason: Reason for stopping (e.g., "timeout", "captcha", "unknown")
-
-        Returns:
-            Path to saved screenshot
-        """
+    def get_title_via_js(self) -> str:
+        """Get page title using JS execution."""
         try:
-            if not self.sb:
-                logger.warning("No browser instance to snapshot")
-                return ""
-
-            # Get current URL
-            try:
-                current_url = self.sb.get_current_url()
-            except:
-                current_url = "unknown"
-
-            # Create filename with timestamp and reason
-            timestamp = int(time.time())
-            safe_url = current_url.replace('https://', '').replace('http://', '').replace('/', '_')[:50]
-            filename = f"{reason}_{timestamp}_{safe_url}.png"
-            filepath = os.path.join(self.debug_dir, filename)
-
-            # Save screenshot
-            self.sb.save_screenshot(filepath)
-
-            # Save URL to text file
-            url_file = filepath.replace('.png', '.txt')
-            with open(url_file, 'w') as f:
-                f.write(f"Reason: {reason}\n")
-                f.write(f"URL: {current_url}\n")
-                f.write(f"Timestamp: {timestamp}\n")
-
-            logger.info(f"📸 Debug snapshot saved: {filename}")
-            logger.info(f"   URL: {current_url}")
-
-            return filepath
-
+            # Execute JS to get title
+            title = self.sb.evaluate("return document.title")
+            logger.info(f"✓ Title retrieved via JS: '{title}'")
+            return title
         except Exception as e:
-            logger.error(f"Failed to save debug snapshot: {str(e)[:100]}")
+            logger.error(f"JS execution failed: {e}")
             return ""
 
-    # ========================================================================
-    # JS HELPERS - Manual Polling
-    # ========================================================================
 
-    def _wait_for_condition(self, js_expression: str, timeout: float = 5, poll_interval: float = 0.1) -> bool:
-        """
-        Poll a JS expression until it returns truthy or timeout.
+def main():
+    """Minimal test: navigate, get title via JS, print, close."""
 
-        Args:
-            js_expression: JS code that returns a boolean
-            timeout: Maximum time to wait (seconds)
-            poll_interval: Time between polls (seconds)
-
-        Returns:
-            True if condition met, False if timeout
-
-        Example:
-            wait_for_condition("return !!document.querySelector('.selector')", timeout=5)
-        """
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            try:
-                result = self.sb.evaluate(js_expression)
-                if result:
-                    return True
-            except:
-                pass
-            time.sleep(poll_interval)
-
-        return False
-
-    def _js_get_url(self) -> str:
-        """Get current URL via JS."""
-        try:
-            return self.sb.evaluate("return window.location.href")
-        except:
-            return ""
-
-    def _js_get_title(self) -> str:
-        """Get page title via JS."""
-        try:
-            return self.sb.evaluate("return document.title")
-        except:
-            return ""
-
-    def _js_get_body_text(self) -> str:
-        """Get body text via JS."""
-        try:
-            return self.sb.evaluate("return document.body.innerText")
-        except:
-            return ""
-
-    def _js_element_exists(self, selector: str) -> bool:
-        """Check if element exists via JS."""
-        try:
-            return self.sb.evaluate(f"return !!document.querySelector('{selector}')")
-        except:
-            return False
-
-    # ========================================================================
-    # NAVIGATION
-    # ========================================================================
-
-    def _wait_for_base_load(self, timeout: int = 10) -> bool:
-        """
-        Ensure basic page load before checking page state (JS version).
-
-        Verifies:
-        - Body element exists
-        - Not on about:blank
-        - Page title exists and not empty
-
-        Args:
-            timeout: Time to wait for base load
-
-        Returns:
-            True if page has basic content loaded
-        """
-        try:
-            # Wait for body tag using JS
-            if not self._wait_for_condition("return !!document.body", timeout=timeout):
-                logger.debug("Body element not found")
-                return False
-
-            # Check we're not on about:blank
-            current_url = self._js_get_url()
-            if "about:blank" in current_url:
-                logger.debug("Still on about:blank")
-                return False
-
-            # Check title exists and not empty
-            title = self._js_get_title()
-            if not title or len(title) == 0:
-                logger.debug("Page title is empty")
-                return False
-
-            logger.debug(f"Base page loaded: {title[:50]}")
-            return True
-
-        except Exception as e:
-            logger.debug(f"Base load check failed: {str(e)[:100]}")
-            return False
-
-    def check_captcha_page(self) -> bool:
-        """
-        Check if current page is a captcha challenge (JS version).
-
-        Returns:
-            True if captcha detected
-        """
-        try:
-            # Check page title via JS
-            title = self._js_get_title()
-            for keyword in self.CAPTCHA_TITLE_KEYWORDS:
-                if keyword in title:
-                    logger.debug(f"Captcha detected in title: '{title}'")
-                    return True
-
-            # Check page body text via JS
-            body_text = self._js_get_body_text()
-            for keyword in self.CAPTCHA_TEXT_KEYWORDS:
-                if keyword in body_text:
-                    logger.debug(f"Captcha detected in body: '{keyword}'")
-                    return True
-
-            return False
-
-        except Exception as e:
-            logger.debug(f"Error checking captcha: {str(e)[:100]}")
-            return False
-
-    def check_no_results_page(self) -> bool:
-        """
-        Check if page shows "no results" message (JS version).
-
-        Returns:
-            True if no results message detected
-        """
-        try:
-            # Check for no results message in body text via JS
-            body_text = self._js_get_body_text()
-            return self.NO_RESULTS_MESSAGE in body_text
-        except Exception as e:
-            logger.debug(f"Error checking no results: {str(e)[:100]}")
-            return False
-
-    def check_page_resources(self) -> bool:
-        """
-        Check if all required page resources are present (JS version).
-
-        Verifies all required elements:
-        - Listing container
-        - At least one listing card
-        - Next page button (XPath converted to CSS)
-
-        Returns:
-            True if all resources found, False otherwise
-        """
-        required_elements = [
-            (self.PAGE_LOADED_SELECTOR, "Listing container"),
-            (self.LISTING_CARD_SELECTOR, "Listing card"),
-            ('a:contains("Próxima página")', "Next page button")  # Note: CSS alternative to XPath
-        ]
-
-        try:
-            missing = []
-
-            # For listing elements, use CSS selectors
-            if not self._js_element_exists(self.PAGE_LOADED_SELECTOR):
-                logger.debug(f"Listing container not found: {self.PAGE_LOADED_SELECTOR}")
-                missing.append("Listing container")
-
-            if not self._js_element_exists(self.LISTING_CARD_SELECTOR):
-                logger.debug(f"Listing card not found: {self.LISTING_CARD_SELECTOR}")
-                missing.append("Listing card")
-
-            # For next button, check via text content
-            next_button_js = """
-                return Array.from(document.querySelectorAll('a'))
-                    .some(a => a.textContent.trim() === 'Próxima página')
-            """
-            has_next_button = self.sb.evaluate(next_button_js)
-            if not has_next_button:
-                logger.debug("Next page button not found")
-                missing.append("Next page button")
-
-            if missing:
-                logger.debug(f"Missing elements: {', '.join(missing)}")
-                return False
-
-            logger.debug("✓ All page resources present")
-            return True
-
-        except Exception as e:
-            logger.debug(f"Error checking page resources: {str(e)[:100]}")
-            return False
-
-    def handle_captcha(self, max_wait: int = 30) -> bool:
-        """
-        Handle captcha with multiple strategies (JS version for title checks).
-
-        Strategy:
-        1. Wait for UC mode auto-solve (30s)
-        2. Try gui_click_captcha()
-        3. Try solve_captcha()
-
-        Args:
-            max_wait: Maximum time to wait for UC mode (default 30s)
-
-        Returns:
-            True if captcha cleared
-        """
-        logger.warning("⚠️  Captcha detected! Trying UC mode auto-solve.")
-
-        # Method 1: UC mode auto-solve (passive waiting)
-        start_time = time.time()
-        while time.time() - start_time < max_wait:
-            try:
-                title = self._js_get_title()  # JS version
-                # Check if captcha keywords still in title
-                captcha_present = any(keyword in title for keyword in self.CAPTCHA_TITLE_KEYWORDS)
-                if not captcha_present:
-                    logger.info("✅ Captcha cleared by UC mode!")
-                    return True
-            except:
-                pass
-
-            time.sleep(1)
-
-        logger.warning("UC mode timeout - trying fallback methods.")
-
-        # Method 2: gui_click_captcha()
-        try:
-            logger.info("Trying gui_click_captcha().")
-            self.sb.gui_click_captcha()
-            time.sleep(3)
-
-            title = self._js_get_title()  # JS version
-            captcha_present = any(keyword in title for keyword in self.CAPTCHA_TITLE_KEYWORDS)
-            if not captcha_present:
-                logger.info("✅ Captcha cleared by gui_click_captcha()!")
-                return True
-        except Exception as e:
-            logger.debug(f"gui_click_captcha() failed: {str(e)[:100]}")
-
-        # Method 3: solve_captcha()
-        try:
-            logger.info("Trying solve_captcha().")
-            self.sb.solve_captcha()
-            time.sleep(3)
-
-            title = self._js_get_title()  # JS version
-            captcha_present = any(keyword in title for keyword in self.CAPTCHA_TITLE_KEYWORDS)
-            if not captcha_present:
-                logger.info("✅ Captcha cleared by solve_captcha()!")
-                return True
-        except Exception as e:
-            logger.debug(f"solve_captcha() failed: {str(e)[:100]}")
-
-        logger.error("🚫 All captcha solving methods failed")
-        return False
-
-    def get_page_state(self, base_load_timeout: int = 5) -> str:
-        """
-        Determine current page state after navigation.
-
-        Performs ordered checks:
-        1. Base load (body + title)
-        2. Captcha (handle if detected)
-        3. No results page
-        4. Page resources present
-
-        Args:
-            base_load_timeout: Timeout for base load check (default 5s)
-
-        Returns:
-            PageState constant indicating current state
-        """
-        # 1. Wait for basic page load
-        if not self._wait_for_base_load(timeout=base_load_timeout):
-            logger.warning("Base page load timeout")
-            return PageState.TIMEOUT
-
-        # 2. Check captcha (FIRST - blocks everything else)
-        if self.check_captcha_page():
-            logger.warning("Captcha detected")
-            if self.handle_captcha():
-                logger.info("Captcha solved, re-checking page state")
-                # Recursively check page state after solving captcha
-                return self.get_page_state(base_load_timeout)
-            else:
-                return PageState.CAPTCHA
-
-        # 3. Check no results (valid but empty page)
-        if self.check_no_results_page():
-            logger.info("No results page detected")
-            return PageState.NO_RESULTS
-
-        # 4. Check all page resources present (expected success state)
-        if self.check_page_resources():
-            logger.debug("✓ All page resources present")
-            return PageState.SUCCESS
-
-        # Unknown state - page loaded but unexpected content
-        logger.warning("Unknown page state (no captcha, no 'no results', no resources)")
-        return PageState.UNKNOWN
-
-    def _wait_for_url_change(self, original_url: str, timeout: int = 2) -> bool:
-        """
-        Actively wait for URL to change from original URL (JS version).
-
-        Args:
-            original_url: The URL before transition
-            timeout: Maximum time to wait (default 2s)
-
-        Returns:
-            True if URL changed within timeout
-        """
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            try:
-                current_url = self._js_get_url()  # JS version
-                if current_url != original_url:
-                    logger.debug(f"URL changed in {time.time() - start_time:.2f}s")
-                    return True
-            except:
-                pass
-            time.sleep(0.1)  # Poll every 100ms
-
-        logger.debug(f"URL didn't change within {timeout}s")
-        return False
-
-    def goto_url(self, url: str, max_retries: int = 2) -> str:
-        """
-        Navigate to URL and determine page state.
-
-        Args:
-            url: URL to navigate to
-            max_retries: Maximum retry attempts (default 2)
-
-        Returns:
-            PageState constant indicating result
-        """
-        logger.info(f"Navigating to: {url}")
-
-        for attempt in range(max_retries):
-            try:
-                # Navigate
-                self.sb.get(url)
-                logger.debug(f"Navigation command sent (attempt {attempt + 1}/{max_retries})")
-
-                # Check page state
-                state = self.get_page_state(base_load_timeout=5)
-
-                # If timeout or unknown, retry
-                if state in [PageState.TIMEOUT, PageState.UNKNOWN]:
-                    if attempt < max_retries - 1:
-                        logger.info("Retrying navigation...")
-                        time.sleep(1)
-                        continue
-
-                # Return state (SUCCESS, NO_RESULTS, CAPTCHA, TIMEOUT, UNKNOWN)
-                logger.info(f"✓ Navigation complete: {state}")
-                return state
-
-            except Exception as e:
-                logger.error(f"Navigation error (attempt {attempt + 1}/{max_retries}): {str(e)[:100]}")
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-                    continue
-                return PageState.TIMEOUT
-
-        return PageState.TIMEOUT
-
-    def goto_next_page(self, max_retries: int = 2) -> str:
-        """
-        Click next page button and verify page transition (JS version).
-
-        Args:
-            max_retries: Maximum retry attempts (default 2)
-
-        Returns:
-            PageState constant indicating result
-        """
-        logger.debug("Attempting to go to next page")
-
-        for attempt in range(max_retries):
-            try:
-                # Store current URL to verify transition (JS version)
-                current_url = self._js_get_url()
-
-                logger.debug("Clicking next page button")
-                self.sb.click(self.NEXT_PAGE_BUTTON)
-
-                # Wait for URL to change (with timeout)
-                if not self._wait_for_url_change(current_url, timeout=2):
-                    logger.warning("URL didn't change after click (2s timeout)")
-                    if attempt < max_retries - 1:
-                        continue
-                    return PageState.UNKNOWN
-
-                # Log new URL (JS version)
-                new_url = self._js_get_url()
-                logger.debug(f"Page transitioned: {new_url}")
-
-                # Check new page state
-                state = self.get_page_state(base_load_timeout=5)
-
-                # If timeout or unknown, retry
-                if state in [PageState.TIMEOUT, PageState.UNKNOWN]:
-                    if attempt < max_retries - 1:
-                        logger.info("Retrying next page click...")
-                        continue
-
-                logger.info(f"✓ Next page navigation complete: {state}")
-                return state
-
-            except Exception as e:
-                logger.error(f"Next page error (attempt {attempt + 1}/{max_retries}): {str(e)[:100]}")
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-                    continue
-                return PageState.TIMEOUT
-
-        return PageState.TIMEOUT
-
-    # TODO: Data extraction
-    # - get_page_data()
-    # - get_total_pages()
-
-    # TODO: Pagination helpers
-    # - get_page_number()
-    # - get_page_url()
-
-
-# ============================================================================
-# SCRAPE TASK - Main workflow function
-# ============================================================================
-
-def scrape_task(url: str):
-    """
-    Orchestrate scraping workflow based on page state.
-
-    Handles different page states:
-    - SUCCESS: Continue with scraping
-    - NO_RESULTS: Stop gracefully (no listings)
-    - CAPTCHA: Captcha couldn't be solved
-    - TIMEOUT: Page failed to load
-    - UNKNOWN: Unexpected page state
-
-    Args:
-        url: URL to test with
-    """
-    logger.info("="*60)
-    logger.info("STARTING SCRAPE TASK")
-    logger.info(f"Test URL: {url}")
-    logger.info("="*60)
+    print("\n" + "="*60)
+    print("MINIMAL JS TEST")
+    print("="*60 + "\n")
 
     scraper = None
 
     try:
-        # Initialize scraper
+        # Initialize
         scraper = OlxScraper()
-        logger.info("✓ Scraper instance created")
-
-        # Initialize browser
         scraper.init_browser()
-        logger.info("✓ Browser initialized")
 
-        # Navigate and get page state
-        state = scraper.goto_url(url)
-        logger.info(f"Page state: {state}")
+        # Navigate
+        test_url = "https://www.olx.com.br/imoveis/venda/casas/estado-df/distrito-federal-e-regiao"
 
-        # Orchestrate actions based on state
-        if state == PageState.SUCCESS:
-            logger.info("="*60)
-            logger.info("✓ SUCCESS - Ready to scrape")
-            logger.info("="*60)
+        if scraper.goto_url(test_url):
+            # Get title via JS
+            title = scraper.get_title_via_js()
 
-            # Test pagination up to 10 pages
-            MAX_TEST_PAGES = 100
-            current_page = 1
+            # Print result
+            print("\n" + "="*60)
+            print("RESULT:")
+            print(f"Title: {title}")
+            print("="*60 + "\n")
 
-            logger.info(f"Starting pagination test (max {MAX_TEST_PAGES} pages)")
-
-            while current_page < MAX_TEST_PAGES:
-                logger.info(f"On page {current_page}, navigating to next page...")
-
-                # Navigate to next page
-                next_state = scraper.goto_next_page()
-
-                if next_state == PageState.SUCCESS:
-                    current_page += 1
-                    logger.info(f"✓ Page {current_page} loaded successfully")
-
-                elif next_state == PageState.NO_RESULTS:
-                    logger.info(f"Reached end of listings at page {current_page}")
-                    break
-
-                elif next_state in [PageState.TIMEOUT, PageState.UNKNOWN]:
-                    logger.warning(f"Navigation failed on page {current_page}: {next_state}")
-                    scraper.save_debug_snapshot(f"pagination_{next_state}_page{current_page}")
-                    break
-
-                elif next_state == PageState.CAPTCHA:
-                    logger.error(f"Captcha on page {current_page}")
-                    scraper.save_debug_snapshot(f"pagination_captcha_page{current_page}")
-                    break
-
-            logger.info(f"Pagination test complete: reached page {current_page}")
-
-        elif state == PageState.NO_RESULTS:
-            logger.info("="*60)
-            logger.info("⚠️  NO RESULTS - No listings found")
-            logger.info("Stopping task gracefully")
-            logger.info("="*60)
-            return
-
-        elif state == PageState.CAPTCHA:
-            logger.error("="*60)
-            logger.error("✗ CAPTCHA FAILED - Couldn't solve captcha")
-            scraper.save_debug_snapshot("initial_captcha")
-            logger.error("Consider:")
-            logger.error("  - Restart browser and retry")
-            logger.error("  - Add delay before retry")
-            logger.error("  - Check captcha solving methods")
-            logger.error("="*60)
-            return
-
-        elif state == PageState.TIMEOUT:
-            logger.error("="*60)
-            logger.error("✗ TIMEOUT - Page failed to load")
-            scraper.save_debug_snapshot("initial_timeout")
-            logger.error("Consider:")
-            logger.error("  - Restart browser")
-            logger.error("  - Check network connection")
-            logger.error("  - Increase timeout values")
-            logger.error("="*60)
-            return
-
-        elif state == PageState.UNKNOWN:
-            logger.warning("="*60)
-            logger.warning("⚠️  UNKNOWN STATE - Unexpected page content")
-            scraper.save_debug_snapshot("initial_unknown")
-            logger.warning("Page loaded but doesn't match expected patterns")
-            logger.warning("="*60)
-            return
-
-        logger.info("✓ Task completed successfully")
+            # Keep browser open to verify
+            logger.info("Keeping browser open for 5 seconds to verify...")
+            time.sleep(5)
+        else:
+            logger.error("Failed to load page")
 
     except Exception as e:
-        logger.error(f"✗ Task failed with exception: {e}")
-        if scraper:
-            scraper.save_debug_snapshot("exception")
+        logger.error(f"Test failed: {e}")
 
     finally:
-        # Always close browser
         if scraper:
             scraper.close_browser()
-            logger.info("✓ Browser closed")
 
-
-# ============================================================================
-# MANUAL TESTS - Run each test as we build methods
-# ============================================================================
-
-def test_browser_init():
-    """Test 1: Browser initialization"""
     print("\n" + "="*60)
-    print("TEST 1: Browser Initialization")
-    print("="*60)
+    print("TEST COMPLETE")
+    print("="*60 + "\n")
 
-    scraper = OlxScraper()
-    # TODO: Implement init_browser() first, then uncomment:
-    # scraper.init_browser(headless=False)
-    # print("✓ Browser initialized successfully")
-    # scraper.close_browser()
-    # print("✓ Browser closed successfully")
-
-    print("⏸️  Test pending - implement init_browser() first")
-
-
-def test_navigation():
-    """Test 2: Navigate to OLX page and verify load"""
-    print("\n" + "="*60)
-    print("TEST 2: Navigation & Page Load")
-    print("="*60)
-
-    # TODO: Implement after browser init works
-    print("⏸️  Test pending - implement navigate() and verify_page_loaded()")
-
-
-def test_extract_data():
-    """Test 3: Extract URLs and prices from a page"""
-    print("\n" + "="*60)
-    print("TEST 3: Data Extraction")
-    print("="*60)
-
-    # TODO: Implement after navigation works
-    print("⏸️  Test pending - implement extract_page_data()")
-
-
-def test_pagination():
-    """Test 4: Click next page and verify navigation"""
-    print("\n" + "="*60)
-    print("TEST 4: Pagination")
-    print("="*60)
-
-    # TODO: Implement after data extraction works
-    print("⏸️  Test pending - implement click_next_page()")
-
-
-def test_full_task():
-    """Test 5: Complete mini-task (scrape 3 pages)"""
-    print("\n" + "="*60)
-    print("TEST 5: Full Task (3 pages)")
-    print("="*60)
-
-    # TODO: Implement after all components work
-    print("⏸️  Test pending - implement full workflow")
-
-
-# ============================================================================
-# MAIN - Run tests
-# ============================================================================
 
 if __name__ == "__main__":
-    print("\n🧪 OLX SCRAPER - INCREMENTAL TESTING")
-    print("="*60)
-
-    # Test URL for development
-    TEST_URL = "https://www.olx.com.br/imoveis/venda/casas/estado-df/distrito-federal-e-regiao"
-
-    # Run scrape task
-    scrape_task(TEST_URL)
-
-    print("\n" + "="*60)
-    print("Testing session complete")
-    print("="*60 + "\n")
+    main()
