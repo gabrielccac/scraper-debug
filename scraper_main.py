@@ -8,8 +8,7 @@ import time
 import logging
 import signal
 import sys
-import threading
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from scraper_class import scrape_task_with_retry
 from redis_client import create_redis_clients
 
@@ -76,7 +75,7 @@ TRANSACTION_TYPES = ["venda", "aluguel"]
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - [%(threadName)s] - %(message)s',
+    format='%(asctime)s - [%(processName)s] - %(message)s',
     datefmt='%H:%M:%S'
 )
 logger = logging.getLogger(__name__)
@@ -89,8 +88,7 @@ for lib in ["seleniumbase", "selenium", "pika", "urllib3"]:
 # GLOBALS
 # ============================================================================
 
-shutdown_event = threading.Event()
-stats_lock = threading.Lock()
+# Global stats - populated at end by aggregating all task results
 global_stats = {
     'tasks_completed': 0,
     'tasks_failed': 0,
@@ -102,14 +100,18 @@ global_stats = {
     'duplicates': 0
 }
 
+# Shutdown flag for signal handling
+shutdown_requested = False
+
 # ============================================================================
 # SIGNAL HANDLING
 # ============================================================================
 
 def signal_handler(sig, frame):
     """Handle shutdown signals gracefully"""
+    global shutdown_requested
     logger.info("Shutdown requested, finishing current tasks...")
-    shutdown_event.set()
+    shutdown_requested = True
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
@@ -168,17 +170,16 @@ def generate_tasks() -> list:
 
 def execute_task(task: dict):
     """
-    Wrapper function to execute a single task and update global stats.
+    Wrapper function to execute a single task in a separate process.
 
-    Each worker creates its own Redis clients to avoid lock contention.
+    Each worker process creates its own Redis clients to avoid contention.
 
     Args:
         task: Task dict with location, prop_type, transaction_type, task_id
-    """
-    if shutdown_event.is_set():
-        logger.info(f"[{task['task_id']}] Shutdown requested, skipping task")
-        return
 
+    Returns:
+        Dict with task stats: {'status': str, 'pages_scraped': int, ...}
+    """
     worker_redis_clients = None
 
     try:
@@ -198,27 +199,20 @@ def execute_task(task: dict):
             max_pages=MAX_PAGES_PER_TASK
         )
 
-        # Update global stats
-        with stats_lock:
-            global_stats['total_pages'] += stats['pages_scraped']
-            global_stats['total_urls'] += stats['urls_found']
-            global_stats['new_urls'] += stats['new_urls']
-            global_stats['price_changes'] += stats['price_changes']
-            global_stats['duplicates'] += stats['duplicates']
-
-            if stats['status'] == 'success':
-                global_stats['tasks_completed'] += 1
-            elif stats['status'] == 'no_results':
-                global_stats['tasks_no_results'] += 1
-            elif stats['status'] == 'failed':
-                global_stats['tasks_failed'] += 1
-
         logger.info(f"[{task['task_id']}] Task complete: {stats['status']}")
+        return stats
 
     except Exception as e:
         logger.error(f"[{task['task_id']}] Task exception: {str(e)[:200]}")
-        with stats_lock:
-            global_stats['tasks_failed'] += 1
+        # Return failed stats
+        return {
+            'status': 'failed',
+            'pages_scraped': 0,
+            'urls_found': 0,
+            'new_urls': 0,
+            'price_changes': 0,
+            'duplicates': 0
+        }
 
     finally:
         # Always cleanup worker's Redis connections
@@ -282,50 +276,73 @@ def main():
         sys.exit(1)
 
     # ========================================================================
-    # EXECUTE TASKS IN PARALLEL
+    # EXECUTE TASKS IN PARALLEL USING MULTIPROCESSING
     # ========================================================================
 
     logger.info("="*60)
-    logger.info(f"🚀 EXECUTING {len(tasks)} TASKS")
+    logger.info(f"🚀 EXECUTING {len(tasks)} TASKS WITH {MAX_WORKERS} PROCESSES")
     logger.info("="*60)
 
+    results = []
+
     try:
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
             # Submit all tasks
             futures = {executor.submit(execute_task, task): task for task in tasks}
 
-            # Wait for completion
-            while futures:
-                if shutdown_event.is_set():
-                    logger.info("Cancelling remaining tasks...")
-                    for f in futures:
-                        f.cancel()
-                    break
-
-                done, not_done = wait(futures, timeout=1.0, return_when=FIRST_COMPLETED)
-
-                for f in done:
-                    try:
-                        f.result()
-                        with stats_lock:
-                            completed = global_stats['tasks_completed'] + global_stats['tasks_failed'] + global_stats['tasks_no_results']
-                        logger.info(f"Progress: {completed}/{len(tasks)} tasks processed")
-                    except Exception as e:
-                        logger.error(f"Task execution error: {e}")
-
-                # Update futures dict
-                futures = {f: futures[f] for f in not_done}
+            # Collect results as they complete
+            completed_count = 0
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    results.append(result)
+                    completed_count += 1
+                    logger.info(f"Progress: {completed_count}/{len(tasks)} tasks processed")
+                except Exception as e:
+                    logger.error(f"Task execution error: {e}")
+                    # Add failed result
+                    results.append({
+                        'status': 'failed',
+                        'pages_scraped': 0,
+                        'urls_found': 0,
+                        'new_urls': 0,
+                        'price_changes': 0,
+                        'duplicates': 0
+                    })
 
     except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt received")
-        shutdown_event.set()
+        logger.info("KeyboardInterrupt received, waiting for current tasks to finish...")
+        # ProcessPoolExecutor will finish current tasks when exiting context
+
+    # ========================================================================
+    # AGGREGATE RESULTS
+    # ========================================================================
+
+    logger.info("="*60)
+    logger.info("📊 AGGREGATING RESULTS")
+    logger.info("="*60)
+
+    for result in results:
+        global_stats['total_pages'] += result.get('pages_scraped', 0)
+        global_stats['total_urls'] += result.get('urls_found', 0)
+        global_stats['new_urls'] += result.get('new_urls', 0)
+        global_stats['price_changes'] += result.get('price_changes', 0)
+        global_stats['duplicates'] += result.get('duplicates', 0)
+
+        status = result.get('status', 'unknown')
+        if status == 'success':
+            global_stats['tasks_completed'] += 1
+        elif status == 'no_results':
+            global_stats['tasks_no_results'] += 1
+        elif status == 'failed':
+            global_stats['tasks_failed'] += 1
 
     # ========================================================================
     # CLEANUP & STATS
     # ========================================================================
 
     # Log Redis stream stats (create temporary client)
-    if not shutdown_event.is_set():
+    if not shutdown_requested:
         try:
             temp_clients = create_redis_clients(
                 site_name=SITE_NAME,
