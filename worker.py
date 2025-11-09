@@ -6,6 +6,7 @@ Processes URLs from queue and extracts property details
 """
 import time
 import re
+import sys
 import json
 import logging
 import os
@@ -38,9 +39,9 @@ class PageState:
     UNKNOWN = "unknown"           # Loaded but unexpected state
 
 
-class OlxWorker:
+class DfimoveisWorker:
     """
-    Worker for processing OLX property detail pages.
+    Worker for processing DFimoveis property detail pages.
     Consumes URLs from queue, extracts property details, stores in DB.
     """
 
@@ -48,19 +49,18 @@ class OlxWorker:
     # CONSTANTS - Site Configuration
     # ========================================================================
 
-    BASE_URL = "https://www.olx.com.br/"
-    SITE_NAME = "olx"
+    SITE_NAME = "dfimoveis"
 
     # Selectors (to be defined as we implement)
-    PROPERTY_LOADED_SELECTOR = 'div.ad__container'  # TODO: Update with actual selector
-    OFFLINE_MESSAGE = 'Anúncio removido'  # TODO: Verify actual message
+    PROPERTY_LOADED_SELECTOR = 'div.info-section '  # TODO: Update with actual selector
+    OFFLINE_SELECTOR = '#anuncioInativoModal.show'  # TODO: Verify actual message
 
     # Captcha detection patterns
     CAPTCHA_TITLE_KEYWORDS = ["Um momento", "Just a moment"]
     CAPTCHA_TEXT_KEYWORDS = ["Confirme que você é humano", "cf-challenge"]
 
     # Settings
-    LOAD_TIMEOUT = 15
+    LOAD_TIMEOUT = 10
     BROWSER_LOCALE = "pt-br"
 
     # ========================================================================
@@ -108,7 +108,6 @@ class OlxWorker:
                     headless=False,
                     locale=self.BROWSER_LOCALE,
                     window_size="1920,1080",
-                    ad_block=True,
                 )
                 logger.debug(f"Browser initialized successfully (attempt {attempt + 1}/{max_retries})")
                 return True
@@ -591,7 +590,7 @@ def worker_main():
 
     try:
         # Initialize worker
-        worker = OlxWorker()
+        worker = DfimoveisWorker()
         worker.init_browser()
         logger.info("✓ Worker initialized")
 
